@@ -17,5 +17,4 @@ wayland-backend = "0.3"
 wayland-scanner = "0.31"
 wayland-protocols = { version = "0.32", features = ["client", "staging"] }
 
-[dev-dependencies]
 tempfile = "3"
