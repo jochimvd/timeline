@@ -23,6 +23,7 @@ pub struct Observation {
 pub struct History {
     connection: Connection,
     directory: PathBuf,
+    cleanup: Option<crate::image_cleanup::ImageCleanup>,
     _writer_lock: Option<File>,
     retention_clock: Option<RetentionClock>,
 }
@@ -103,6 +104,7 @@ impl History {
         Ok(Self {
             connection,
             directory: directory.to_owned(),
+            cleanup: None,
             _writer_lock: Some(writer_lock),
             retention_clock,
         })
@@ -119,6 +121,7 @@ impl History {
         Ok(Self {
             connection,
             directory: directory.to_owned(),
+            cleanup: None,
             _writer_lock: None,
             retention_clock: None,
         })
@@ -136,7 +139,11 @@ impl History {
         )?;
         transaction.execute("DELETE FROM images WHERE name NOT IN (SELECT image FROM screenshots WHERE image IS NOT NULL)", [])?;
         transaction.commit()?;
-        self.reclaim_images()?;
+        if let Some(cleanup) = &mut self.cleanup {
+            cleanup.request()?;
+        } else {
+            self.reclaim_images(&std::sync::atomic::AtomicBool::new(false))?;
+        }
         Ok(count)
     }
 
@@ -493,16 +500,6 @@ impl History {
     pub fn image(&self, id: i64) -> Result<Option<ImageRead>> {
         use std::io::Read;
         ensure!(id > 0, "invalid screenshot identifier");
-        let lease = Self::image_lease(&self.directory)?;
-        let name: Option<Option<String>> = self
-            .connection
-            .query_row("SELECT image FROM screenshots WHERE id=?1", [id], |row| {
-                row.get(0)
-            })
-            .optional()?;
-        let Some(name) = name.flatten() else {
-            return Ok(None);
-        };
         let mut slot = None;
         for index in 0..2 {
             let file = File::open(self.directory.join(format!("image-read-{index}.lock")))?;
@@ -516,6 +513,17 @@ impl History {
             }
         }
         let slot = slot.context("image reads busy")?;
+        let lease = File::open(self.directory.join("images.lock"))?;
+        lease.try_lock_shared().context("image cleanup busy")?;
+        let name: Option<Option<String>> = self
+            .connection
+            .query_row("SELECT image FROM screenshots WHERE id=?1", [id], |row| {
+                row.get(0)
+            })
+            .optional()?;
+        let Some(name) = name.flatten() else {
+            return Ok(None);
+        };
         let file = match File::open(self.directory.join("images").join(name)) {
             Ok(file) => file,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -532,14 +540,15 @@ impl History {
         }))
     }
 
-    fn reclaim_images(&self) -> Result<()> {
-        let lease = File::open(self.directory.join("images.lock"))?;
-        match lease.try_lock() {
-            Ok(()) => (),
-            Err(std::fs::TryLockError::WouldBlock) => return Ok(()),
-            Err(error) => return Err(error.into()),
-        }
+    /// Background reclamation never holds the deletion lease across a directory
+    /// scan. Each file gets one bounded critical section, protecting publication.
+    pub(crate) fn reclaim_images(&self, stop: &std::sync::atomic::AtomicBool) -> Result<bool> {
+        use std::sync::atomic::Ordering;
+        let mut complete = true;
         for entry in fs::read_dir(self.directory.join("images"))? {
+            if stop.load(Ordering::Relaxed) {
+                return Ok(false);
+            }
             let entry = entry?;
             let name = entry.file_name();
             let name = name.to_string_lossy();
@@ -547,16 +556,62 @@ impl History {
             {
                 continue;
             }
+            let lease = File::open(self.directory.join("images.lock"))?;
+            match lease.try_lock() {
+                Ok(()) => (),
+                Err(std::fs::TryLockError::WouldBlock) => {
+                    complete = false;
+                    continue;
+                }
+                Err(error) => return Err(error.into()),
+            }
             let retained: bool = self.connection.query_row(
                 "SELECT EXISTS(SELECT 1 FROM images WHERE name=?1)",
                 [&*name],
                 |row| row.get(0),
             )?;
             if !retained {
-                fs::remove_file(entry.path())?;
+                match fs::remove_file(entry.path()) {
+                    Ok(()) => (),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
+                    Err(error) => return Err(error.into()),
+                }
             }
         }
         File::open(self.directory.join("images"))?.sync_all()?;
+        Ok(complete)
+    }
+
+    pub fn enable_background_cleanup(&mut self) -> Result<()> {
+        if self.cleanup.is_none() {
+            self.cleanup = Some(crate::image_cleanup::ImageCleanup::start(
+                self.directory.clone(),
+            )?);
+        }
+        Ok(())
+    }
+
+    pub fn cleanup_pending(&mut self) -> Result<bool> {
+        self.cleanup
+            .as_mut()
+            .map(|cleanup| cleanup.pending())
+            .unwrap_or(Ok(false))
+    }
+
+    pub fn screenshot_pressure(&self) -> Result<bool> {
+        Ok(self
+            .connection
+            .query_row(
+                "SELECT value FROM state WHERE key='screenshot_pressure'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?
+            .unwrap_or(false))
+    }
+
+    pub fn set_screenshot_pressure(&mut self, pressure: bool) -> Result<()> {
+        self.connection.execute("INSERT INTO state VALUES ('screenshot_pressure',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value", [pressure])?;
         Ok(())
     }
 

@@ -41,6 +41,7 @@ pub struct Status {
     pub focus_known: bool,
     pub screenshot_recording: bool,
     pub screenshot_pressure: bool,
+    pub screenshot_cleanup: bool,
 }
 
 pub struct Recorder {
@@ -62,6 +63,7 @@ impl Recorder {
         let retention_now = history.advance_retention_clock(&boot_id, stamp.boot_ms, stamp.unix_ms);
         history.cleanup_before(retention_now - RETENTION_MS)?;
         let manual_paused = history.manual_paused()?;
+        let pressure = history.screenshot_pressure()?;
         let segment = history.start_segment()?;
         history.append(stamp.unix_ms, stamp.monotonic_ms, segment, json!({
             "kind": "boundary", "reason": if previous.is_some() { "restart" } else { "startup" },
@@ -70,7 +72,10 @@ impl Recorder {
         }))?;
         Ok(Self {
             history,
-            capture: Default::default(),
+            capture: crate::capture::CaptureState {
+                pressure,
+                ..Default::default()
+            },
             segment,
             last_commit_ms: stamp.monotonic_ms,
             last_stamp: stamp,
@@ -84,7 +89,8 @@ impl Recorder {
                 focus: None,
                 focus_known: false,
                 screenshot_recording: false,
-                screenshot_pressure: false,
+                screenshot_pressure: pressure,
+                screenshot_cleanup: false,
             },
         })
     }
@@ -96,6 +102,11 @@ impl Recorder {
         &self.history
     }
 
+    /// Runtime opt-in: image reconciliation runs independently of desktop events.
+    pub fn enable_background_cleanup(&mut self) -> Result<()> {
+        self.history.enable_background_cleanup()
+    }
+
     /// The probe is an external filesystem seam, allowing deterministic pressure tests.
     pub fn check_storage_pressure(
         &mut self,
@@ -105,11 +116,22 @@ impl Recorder {
         use crate::config::{PRESSURE_RESUME_BYTES, PRESSURE_STOP_BYTES};
         self.apply(Input::Tick, stamp)?;
         let mut bytes = available()?;
-        if bytes < PRESSURE_STOP_BYTES {
+        if self.capture.pressure_cleanup {
+            if self.history.cleanup_pending()? {
+                return Ok(());
+            }
+            self.capture.pressure_cleanup = false;
+        } else if bytes < PRESSURE_STOP_BYTES && !self.capture.pressure {
             let retention_now =
                 self.history
                     .advance_retention_clock(&self.boot_id, stamp.boot_ms, stamp.unix_ms);
             self.history.cleanup_before(retention_now - RETENTION_MS)?;
+            if self.history.cleanup_pending()? {
+                self.capture.pressure_cleanup = true;
+                self.invalidate_captures("disk_cleanup", stamp)?;
+                self.update_capture_status();
+                return Ok(());
+            }
             bytes = available()?;
         }
         let pressure = if self.capture.pressure {
@@ -126,13 +148,15 @@ impl Recorder {
                 },
                 stamp,
             )?;
+            self.history.set_screenshot_pressure(pressure)?;
             self.capture.pressure = pressure;
-            self.update_capture_status();
         }
+        self.update_capture_status();
         Ok(())
     }
 
     pub fn apply(&mut self, input: Input, stamp: Stamp) -> Result<()> {
+        self.history.cleanup_pending()?;
         let retention_now =
             self.history
                 .advance_retention_clock(&self.boot_id, stamp.boot_ms, stamp.unix_ms);

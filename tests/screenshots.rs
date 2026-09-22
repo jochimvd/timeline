@@ -120,3 +120,33 @@ fn image_reads_are_bounded_and_missing_files_do_not_substitute_other_evidence() 
     assert!(reader.image(id).unwrap().is_none());
     assert!(reader.screenshots(0, 501).is_err());
 }
+
+#[test]
+fn cleanup_contention_returns_busy_without_waiting_outside_read_admission() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut history = History::open(dir.path()).unwrap();
+    let image = History::prepare_image(dir.path(), b"image").unwrap();
+    let id = history
+        .commit_screenshot(&sample(100, "DP-1"), "pixels", &image)
+        .unwrap();
+    drop(image);
+    // External OS lock seam simulates reconciliation holding its deletion lease.
+    let lock = std::fs::File::open(dir.path().join("images.lock")).unwrap();
+    lock.lock().unwrap();
+    let reader = History::read(dir.path()).unwrap();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let thread = std::thread::spawn(move || {
+        sender
+            .send(reader.image(id).err().map(|e| e.to_string()))
+            .unwrap();
+    });
+    let response = receiver.recv_timeout(std::time::Duration::from_millis(200));
+    lock.unlock().unwrap();
+    thread.join().unwrap();
+    assert!(
+        response
+            .expect("retrieval waited outside admission")
+            .unwrap()
+            .contains("busy")
+    );
+}

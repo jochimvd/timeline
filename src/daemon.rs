@@ -64,6 +64,7 @@ pub fn request(directory: &Path, command: &str) -> Result<String> {
 pub fn run(directory: &Path) -> Result<()> {
     // The writer lock is acquired before reclaiming a stale control socket.
     let mut recorder = Recorder::open(directory, now()?)?;
+    recorder.enable_background_cleanup()?;
     let socket_path = directory.join("control.sock");
     match fs::remove_file(&socket_path) {
         Ok(()) => (),

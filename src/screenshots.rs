@@ -72,10 +72,7 @@ impl Screenshots {
                     self.ready.extend(frames);
                 }
                 Err(error) => {
-                    self.error = Some(format!("{error:#}"));
-                    self.backend = None;
-                    recorder.set_monitors(vec![], now()?)?;
-                    self.retry = Instant::now() + Duration::from_secs(2);
+                    self.backend_failed(recorder, error)?;
                 }
             }
         }
@@ -86,9 +83,7 @@ impl Screenshots {
                 match backend.synchronize() {
                     Ok(()) => recorder.set_monitors(backend.monitors(), now()?)?,
                     Err(error) => {
-                        self.error = Some(format!("{error:#}"));
-                        self.backend = None;
-                        recorder.set_monitors(vec![], now()?)?;
+                        self.backend_failed(recorder, error)?;
                     }
                 }
             }
@@ -124,10 +119,8 @@ impl Screenshots {
                     Ok(Some(reason)) => recorder.capture_failed(&request, reason, now()?)?,
                     Ok(None) => (),
                     Err(error) => {
-                        self.error = Some(format!("{error:#}"));
                         recorder.capture_failed(&request, "capture_disconnected", now()?)?;
-                        recorder.set_monitors(vec![], now()?)?;
-                        self.backend = None;
+                        self.backend_failed(recorder, error)?;
                         break;
                     }
                 }
@@ -135,6 +128,14 @@ impl Screenshots {
         }
         Ok(())
     }
+    fn backend_failed(&mut self, recorder: &mut Recorder, error: anyhow::Error) -> Result<()> {
+        self.error = Some(format!("{error:#}"));
+        self.backend = None;
+        self.ready.clear();
+        self.retry = Instant::now() + Duration::from_secs(2);
+        recorder.set_monitors(vec![], now()?)
+    }
+
     fn publish(&mut self, recorder: &mut Recorder, result: EncodedCapture) -> Result<()> {
         if !recorder.capture_valid(&result.request) {
             return Ok(());

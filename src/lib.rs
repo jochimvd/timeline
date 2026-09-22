@@ -11,3 +11,5 @@ mod image_worker;
 pub mod capture_desktop;
 
 mod screenshots;
+
+mod image_cleanup;

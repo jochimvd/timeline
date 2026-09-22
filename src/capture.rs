@@ -29,12 +29,13 @@ pub struct CaptureRequest {
 
 #[derive(Default)]
 pub(crate) struct CaptureState {
-    monitors: BTreeMap<String, Monitor>,
-    pending: BTreeMap<String, u64>,
-    serial: u64,
-    next_ms: i64,
-    rotation: usize,
+    pub(crate) monitors: BTreeMap<String, Monitor>,
+    pub(crate) pending: BTreeMap<String, u64>,
+    pub(crate) serial: u64,
+    pub(crate) next_ms: i64,
+    pub(crate) rotation: usize,
     pub pressure: bool,
+    pub pressure_cleanup: bool,
 }
 
 impl Recorder {
@@ -81,8 +82,10 @@ impl Recorder {
             && !self.status.locked
             && !self.status.manual_paused
             && !self.capture.pressure
+            && !self.capture.pressure_cleanup
             && !self.capture.monitors.is_empty();
         self.status.screenshot_pressure = self.capture.pressure;
+        self.status.screenshot_cleanup = self.capture.pressure_cleanup;
     }
 
     fn sample(&self, monitor: &Monitor, stamp: Stamp) -> ScreenshotSample {
