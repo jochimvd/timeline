@@ -121,3 +121,45 @@ fn daemon_pause_is_durable_after_forced_exit_and_duplicate_recorder_is_rejected(
             .any(|o| o["evidence"]["reason"] == "restart")
     );
 }
+
+#[test]
+fn screenshot_inspection_streams_only_the_requested_retained_identifier() {
+    use timeline::history::{History, ScreenshotSample};
+    let root = tempfile::tempdir().unwrap();
+    let dir = root.path().join("timeline");
+    let mut history = History::open(&dir).unwrap();
+    let image = History::prepare_image(&dir, b"encoded fixture").unwrap();
+    let sample = ScreenshotSample {
+        unix_ms: 100,
+        monotonic_ms: 1,
+        segment: 1,
+        monitor: "DP-1".into(),
+        width: 2,
+        height: 1,
+        transform: 0,
+    };
+    let id = history
+        .commit_screenshot(&sample, "pixels", &image)
+        .unwrap();
+    let call = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_timeline"))
+            .env("XDG_DATA_HOME", root.path())
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    let output = call(&["screenshots", "--limit", "1"]);
+    assert!(output.status.success());
+    let page: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(page["screenshots"][0]["id"], id);
+    assert_eq!(page["has_more"], false);
+    let output = call(&["image", &id.to_string()]);
+    assert!(output.status.success());
+    assert_eq!(output.stdout, b"encoded fixture");
+    drop(image);
+    history.cleanup_before(200).unwrap();
+    let output = call(&["image", &id.to_string()]);
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("unavailable or expired"));
+}

@@ -317,3 +317,42 @@ fn background_reclamation_does_not_block_metadata_and_pressure_waits_for_cleanup
         0
     );
 }
+
+#[test]
+fn monitors_rotate_admission_and_reconnect_requires_a_fresh_request() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut r = Recorder::open(dir.path(), at(0)).unwrap();
+    r.apply(
+        Input::Connected {
+            locked: false,
+            idle: false,
+        },
+        at(0),
+    )
+    .unwrap();
+    r.set_monitors(vec![monitor("DP-1"), monitor("DP-2")], at(0))
+        .unwrap();
+    let old = r.request_captures(CaptureTrigger::Timer, at(0)).unwrap();
+    assert_eq!(old[0].monitor.name, "DP-1");
+    for request in &old {
+        r.capture_failed(request, "raw_pixel_budget", at(1))
+            .unwrap();
+    }
+    let next = r.request_captures(CaptureTrigger::Timer, at(5)).unwrap();
+    assert_eq!(next[0].monitor.name, "DP-2");
+    let mut resized = monitor("DP-1");
+    resized.width = 4;
+    resized.revision = 2;
+    r.set_monitors(vec![resized.clone(), monitor("DP-2")], at(6))
+        .unwrap();
+    assert!(r.capture_valid(&next[0]));
+    assert!(!r.capture_valid(&next[1]));
+    r.set_monitors(vec![monitor("DP-2")], at(7)).unwrap();
+    r.set_monitors(vec![resized, monitor("DP-2")], at(8))
+        .unwrap();
+    assert!(!r.capture_valid(&next[1]));
+    let fresh = r.request_captures(CaptureTrigger::Timer, at(10)).unwrap();
+    assert_eq!(fresh.len(), 1);
+    assert_eq!(fresh[0].monitor.width, 4);
+    assert!(r.capture_valid(&fresh[0]));
+}

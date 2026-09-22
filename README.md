@@ -77,7 +77,8 @@ restart. Across a machine reboot, nonnegative wall-clock elapsed time is the
 fallback; elapsed time while powered off cannot be independently verified.
 SQLite reuses reclaimed pages; metadata cleanup does not immediately shrink the
 database file. Cleanup also removes expired screenshot references and reclaims
-unreferenced image files. Two cross-process image-read slots bound streaming
+unreferenced image files. During recording, a coalescing background worker scans
+image files so physical cleanup does not stall focus events. Two cross-process image-read slots bound streaming
 reads to 64 MiB each; a shared lease lets active reads finish before reclamation.
 A concurrent third read returns busy. Expired or missing images return an explicit
 unavailable error, never a substitute screenshot.
@@ -108,7 +109,8 @@ monitor changes invalidate delayed results; fresh samples establish new coverage
 
 Below 20 GiB available on the history filesystem, expired history is cleaned
 first. Screenshot storage then stops if space remains low and resumes only above
-25 GiB. There is no recording-size cap and younger history is retained. `status`
+25 GiB; this pressure state survives restart. While a pressure-triggered cleanup
+is still running, screenshots wait and metadata continues. There is no recording-size cap and younger history is retained. `status`
 exposes pressure, desktop/capture errors and screenshot availability; `screenshots`
 lists stable screenshot IDs and per-monitor missing-sample reasons. Its page size
 is 1–500; `image ID` streams a single WebP while recording or offline.
@@ -144,7 +146,11 @@ Tests use real temporary SQLite databases, controlled recording events/clocks,
 synthetic Hyprland sockets, and child processes. The daemon process test removes
 desktop connection variables, so it never records the developer's real windows.
 It verifies durable pause after SIGKILL, singleton recording, and inspection.
-These checks do not establish real-desktop performance or live compositor behavior.
+The ignored `live_capture` test requires two explicitly provisioned headless
+outputs named `TIMELINE-TEST-A/B`, on unfocused `timeline-test-*` workspaces.
+It requests only those outputs and checks workspace placement/focus throughout.
+A 12-second two-output run passed; physical-monitor performance and integrated
+resource budgets remain unverified. Ordinary `cargo test` never runs live capture.
 
 The completed planning map and current build ticket live under `.scratch/`.
 Screenshot corpora and throwaway build artifacts remain untracked.

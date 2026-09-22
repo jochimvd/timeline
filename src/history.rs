@@ -133,11 +133,17 @@ impl History {
             "DELETE FROM observations WHERE retention_ms < ?1",
             [cutoff_retention_ms],
         )?;
+        // Only images touched by this expiry can lose their final reference.
+        // Avoid a full retained-image table scan on the metadata event thread.
+        transaction.execute(
+            "DELETE FROM images WHERE name IN (SELECT image FROM screenshots WHERE retention_ms < ?1 AND image IS NOT NULL)
+             AND NOT EXISTS (SELECT 1 FROM screenshots WHERE image=images.name AND retention_ms >= ?1)",
+            [cutoff_retention_ms],
+        )?;
         transaction.execute(
             "DELETE FROM screenshots WHERE retention_ms < ?1",
             [cutoff_retention_ms],
         )?;
-        transaction.execute("DELETE FROM images WHERE name NOT IN (SELECT image FROM screenshots WHERE image IS NOT NULL)", [])?;
         transaction.commit()?;
         if let Some(cleanup) = &mut self.cleanup {
             cleanup.request()?;
