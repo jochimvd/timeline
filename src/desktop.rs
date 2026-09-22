@@ -121,7 +121,13 @@ impl Hyprland {
     /// Reestablish focus after a recording boundary. Old events are discarded,
     /// and the caller must recheck lock/pause state before publishing the result.
     pub fn refresh(&mut self) -> Result<Option<Window>> {
-        self.drain()?;
+        // A new subscription is the generation boundary: neither partial bytes
+        // nor half of a paired activewindow event can survive pause/lock/resume.
+        let events = UnixStream::connect(self.directory.join(".socket2.sock"))?;
+        events.set_nonblocking(true)?;
+        self.events = events;
+        self.buffer.clear();
+        self.pending = None;
         self.current = snapshot(&self.directory)?;
         // Events concurrent with the snapshot are drained by the next poll.
         Ok(self.current())

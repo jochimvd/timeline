@@ -132,6 +132,11 @@ impl Recorder {
             self.last_commit_ms = stamp.monotonic_ms;
         }
         self.last_stamp = stamp;
+        // A focus result already in flight cannot establish fresh coverage after
+        // a timing boundary. The runtime must obtain a new snapshot instead.
+        if discontinuity.is_some() && matches!(input, Input::Focus(_)) {
+            return Ok(());
+        }
         let mut next = self.status.clone();
         let (kind, paused) = match input {
             Input::Connected { locked, idle } => {

@@ -1,6 +1,6 @@
 use crate::{
     desktop::Hyprland,
-    recording::{Input, Recorder, Stamp},
+    recording::{Input, Recorder, Stamp, Window},
     session::Session,
 };
 use anyhow::{Context, Result, bail, ensure};
@@ -133,15 +133,18 @@ pub fn run(directory: &Path) -> Result<()> {
                                         recorder.apply(input, now()?)?;
                                     }
                                     if !crossed_boundary {
-                                        recorder.apply(Input::Focus(focus), now()?)?;
+                                        publish_focus_changes(&mut recorder, vec![focus], || {
+                                            session.events()
+                                        })?;
                                     }
                                 }
                                 Err(error) => desktop_error = Some(format!("{error:#}")),
                             }
-                        } else {
-                            for focus in changes {
-                                recorder.apply(Input::Focus(focus), now()?)?;
-                            }
+                        } else if !changes.is_empty() {
+                            // Establish the current compositor lock state after
+                            // draining IPC, then check it between every commit.
+                            session.synchronize()?;
+                            publish_focus_changes(&mut recorder, changes, || session.events())?;
                         }
                     }
                 }
@@ -185,6 +188,35 @@ pub fn run(directory: &Path) -> Result<()> {
         thread::sleep(Duration::from_millis(50));
     }
     recorder.apply(Input::Disconnected, now()?)?;
+    Ok(())
+}
+
+/// Publish a received focus batch while giving session boundaries priority.
+/// The callback is the external lock/idle notification source; callers establish
+/// a compositor synchronization barrier before entering this publication loop.
+/// Any error is terminal for the current recording run, leaving uncertain time
+/// after its last durable observation for restart recovery.
+pub fn publish_focus_changes(
+    recorder: &mut Recorder,
+    changes: Vec<Option<Window>>,
+    mut session_events: impl FnMut() -> Result<Vec<Input>>,
+) -> Result<()> {
+    for focus in changes {
+        let events = session_events()?;
+        let crossed_boundary = events.iter().any(|event| matches!(event, Input::Locked(_)));
+        for input in events {
+            recorder.apply(input, now()?)?;
+        }
+        if crossed_boundary || recorder.status().locked || recorder.status().manual_paused {
+            break;
+        }
+        recorder.apply(Input::Focus(focus), now()?)?;
+        if !recorder.status().focus_known {
+            // A suspend/clock/stall boundary may have been detected while this
+            // batch was in flight. Discard the remaining pre-boundary results.
+            break;
+        }
+    }
     Ok(())
 }
 

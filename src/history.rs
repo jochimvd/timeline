@@ -14,7 +14,8 @@ const MAX_EVIDENCE_BYTES: usize = 1024 * 1024;
 pub struct Observation {
     pub id: i64,
     pub unix_ms: i64,
-    pub elapsed_ms: i64,
+    /// Absolute CLOCK_MONOTONIC reading, not an observation duration.
+    pub monotonic_ms: i64,
     pub segment: i64,
     pub evidence: serde_json::Value,
 }
@@ -153,18 +154,18 @@ impl History {
     pub fn append(
         &mut self,
         unix_ms: i64,
-        elapsed_ms: i64,
+        monotonic_ms: i64,
         segment: i64,
         evidence: serde_json::Value,
     ) -> Result<i64> {
-        self.commit(unix_ms, elapsed_ms, segment, evidence, None)
+        self.commit(unix_ms, monotonic_ms, segment, evidence, None)
     }
 
     /// Publish evidence and an optional manual-pause change as one durable commit.
     pub fn commit(
         &mut self,
         unix_ms: i64,
-        elapsed_ms: i64,
+        monotonic_ms: i64,
         segment: i64,
         evidence: serde_json::Value,
         paused: Option<bool>,
@@ -177,7 +178,7 @@ impl History {
         let transaction = self.connection.transaction()?;
         transaction.execute(
             "INSERT INTO observations(unix_ms, elapsed_ms, segment, evidence, retention_ms) VALUES (?1,?2,?3,?4,?5)",
-            params![unix_ms, elapsed_ms, segment, evidence, self.retention_clock.as_ref().map(|clock| clock.age_ms).unwrap_or(unix_ms)],
+            params![unix_ms, monotonic_ms, segment, evidence, self.retention_clock.as_ref().map(|clock| clock.age_ms).unwrap_or(unix_ms)],
         )?;
         let id = transaction.last_insert_rowid();
         if let Some(paused) = paused {
@@ -245,7 +246,7 @@ impl History {
         let mut observations = Vec::new();
         let mut bytes = 0;
         for row in rows {
-            let (id, unix_ms, elapsed_ms, segment, evidence) = row?;
+            let (id, unix_ms, monotonic_ms, segment, evidence) = row?;
             ensure!(
                 evidence.len() <= MAX_EVIDENCE_BYTES,
                 "stored observation exceeds evidence byte limit"
@@ -257,7 +258,7 @@ impl History {
             observations.push(Observation {
                 id,
                 unix_ms,
-                elapsed_ms,
+                monotonic_ms,
                 segment,
                 evidence: serde_json::from_str(&evidence)?,
             });

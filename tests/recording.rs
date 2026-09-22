@@ -242,3 +242,71 @@ fn a_forward_wall_clock_jump_does_not_expire_young_history_even_after_restart() 
             .any(|o| o.id == original_id)
     );
 }
+
+#[test]
+fn publication_checks_for_lock_between_each_focus_observation() {
+    use timeline::daemon::{now, publish_focus_changes};
+    for lock_before in [0, 1] {
+        let directory = tempfile::tempdir().unwrap();
+        let mut recorder = Recorder::open(directory.path(), now().unwrap()).unwrap();
+        recorder
+            .apply(
+                Input::Connected {
+                    locked: false,
+                    idle: false,
+                },
+                now().unwrap(),
+            )
+            .unwrap();
+        let changes = vec![Some(window("first")), Some(window("must not publish"))];
+        let mut polls = 0;
+        publish_focus_changes(&mut recorder, changes, || {
+            let events = if polls == lock_before {
+                vec![Input::Locked(true)]
+            } else {
+                vec![]
+            };
+            polls += 1;
+            Ok(events)
+        })
+        .unwrap();
+        assert!(recorder.status().locked);
+        assert!(!recorder.status().focus_known);
+        let text =
+            serde_json::to_string(&recorder.history().observations(0, 100).unwrap()).unwrap();
+        assert!(!text.contains("must not publish"));
+        if lock_before == 0 {
+            assert!(!text.contains("first"));
+        }
+    }
+}
+
+#[test]
+fn a_focus_result_delayed_across_suspend_cannot_reopen_coverage() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut recorder = Recorder::open(directory.path(), at(0)).unwrap();
+    recorder
+        .apply(
+            Input::Connected {
+                locked: false,
+                idle: false,
+            },
+            at(1),
+        )
+        .unwrap();
+    recorder
+        .apply(Input::Focus(Some(window("work"))), at(2))
+        .unwrap();
+    recorder
+        .apply(
+            Input::Focus(Some(window("delayed before suspend"))),
+            Stamp {
+                boot_ms: 40_000,
+                ..at(4)
+            },
+        )
+        .unwrap();
+    assert!(!recorder.status().focus_known);
+    let text = serde_json::to_string(&recorder.history().observations(0, 100).unwrap()).unwrap();
+    assert!(!text.contains("delayed before suspend"));
+}
