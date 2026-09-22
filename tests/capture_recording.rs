@@ -160,3 +160,87 @@ fn pressure_cleans_expired_evidence_then_uses_strict_hysteresis_and_fresh_genera
         1
     );
 }
+
+#[test]
+fn completed_identical_pixels_reuse_a_webp_but_changed_pixels_encode_new_evidence() {
+    use std::{
+        io::Read,
+        time::{Duration, Instant},
+    };
+    use timeline::capture::{PixelBudget, RecordingImages};
+    let dir = tempfile::tempdir().unwrap();
+    let mut r = Recorder::open(dir.path(), at(0)).unwrap();
+    r.apply(
+        Input::Connected {
+            locked: false,
+            idle: false,
+        },
+        at(0),
+    )
+    .unwrap();
+    r.set_monitors(vec![monitor("DP-1")], at(0)).unwrap();
+    let budget = PixelBudget::default();
+    let mut worker =
+        RecordingImages::with_space_probe(dir.path().to_owned(), || Ok(100 * 1024 * 1024 * 1024))
+            .unwrap();
+    for (time, color, duplicate) in [(0, 40, false), (5, 40, true), (10, 200, false)] {
+        let request = r
+            .request_captures(CaptureTrigger::Timer, at(time))
+            .unwrap()
+            .remove(0);
+        let mut pixels = budget.allocate(2, 1).unwrap().unwrap();
+        pixels
+            .bytes_mut()
+            .copy_from_slice(&[color, 10, 20, 0, color, 10, 20, 123]);
+        worker.submit(request, pixels).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let completed = loop {
+            if let Some(result) = worker.poll().unwrap() {
+                break result;
+            }
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        let (fingerprint, image) = completed.result.unwrap();
+        assert_eq!(image.is_none(), duplicate);
+        if let Some(image) = image {
+            assert!(
+                r.publish_capture(&completed.request, &fingerprint, &image, at(time))
+                    .unwrap()
+            );
+        } else {
+            assert!(
+                r.reuse_capture(&completed.request, &fingerprint, at(time))
+                    .unwrap()
+            );
+        }
+    }
+    let records = r.history().screenshots(0, 100).unwrap();
+    assert_eq!(records.len(), 3);
+    assert_eq!(records[0].image, records[1].image);
+    assert_ne!(records[1].image, records[2].image);
+    let mut webp = Vec::new();
+    r.history()
+        .image(records[0].id)
+        .unwrap()
+        .unwrap()
+        .read_to_end(&mut webp)
+        .unwrap();
+    assert_eq!(&webp[0..4], b"RIFF");
+    assert_eq!(&webp[8..12], b"WEBP");
+}
+
+#[test]
+fn raw_pixels_are_globally_bounded_and_capacity_returns_after_cancellation() {
+    use timeline::capture::PixelBudget;
+    let budget = PixelBudget::default();
+    let a = budget.allocate(3840, 2160).unwrap().unwrap();
+    let b = budget.clone().allocate(3840, 2160).unwrap().unwrap();
+    let c = budget.allocate(3840, 2160).unwrap().unwrap();
+    assert!(budget.allocate(3840, 2160).unwrap().is_none());
+    drop(b);
+    assert!(budget.allocate(3840, 2160).unwrap().is_some());
+    drop(a);
+    drop(c);
+    assert!(budget.allocate(0, 2160).is_err());
+}

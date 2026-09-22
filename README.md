@@ -2,15 +2,15 @@
 
 A local Rust desktop activity recorder for Linux, Wayland, and Hyprland.
 
-The first runnable slice records original active-window observations and input
-idle state into durable SQLite history. It includes persistent pause/resume,
-explicit recording boundaries, bounded evidence inspection, and metadata retention.
-Screenshot capture/storage, activity aggregation, the browser timeline, and MCP
-are subsequent implementation slices. `status` explicitly reports screenshot
-recording as unavailable. Integrated resource and latency targets are not yet
-measured.
+The recorder stores original active-window observations, input-idle state, and
+per-monitor screenshots in durable local history. It includes persistent
+pause/resume, explicit recording boundaries, bounded evidence inspection, and
+30-day retention. Activity aggregation, the browser timeline, and MCP are later
+implementation slices. Integrated resource and latency targets remain unmeasured.
 
 ## Build and run
+
+Build dependencies include a C compiler, pkg-config, and libwebp development files.
 
 ```sh
 cargo build --release --locked
@@ -31,6 +31,8 @@ In another terminal:
 ./target/release/timeline resume
 ./target/release/timeline observations --limit 100
 ./target/release/timeline observations --after 123 --limit 100
+./target/release/timeline screenshots --limit 100
+./target/release/timeline image 42 > screenshot.webp
 ```
 
 `observations` works while recording or offline. It returns raw evidence in
@@ -74,8 +76,42 @@ wall-clock jump cannot expire recent history during the same boot or recorder
 restart. Across a machine reboot, nonnegative wall-clock elapsed time is the
 fallback; elapsed time while powered off cannot be independently verified.
 SQLite reuses reclaimed pages; metadata cleanup does not immediately shrink the
-database file. Image reclamation and screenshot disk-pressure behavior belong to
-the forthcoming image-storage slice.
+database file. Cleanup also removes expired screenshot references and reclaims
+unreferenced image files. Two cross-process image-read slots bound streaming
+reads to 64 MiB each; a shared lease lets active reads finish before reclamation.
+A concurrent third read returns busy. Expired or missing images return an explicit
+unavailable error, never a substitute screenshot.
+
+## Screenshot capture
+
+Persistent `ext-image-copy-capture-v1` sessions capture each named Wayland output
+independently every five seconds. Version 4 `wl_output` names and SHM XRGB8888 or
+ARGB8888 support are required. Images preserve native buffer dimensions and carry
+the Wayland transform for readers to apply. UTC capture time is mapped from the
+protocol's monotonic presentation timestamp; identifiers preserve ordering.
+
+One background worker hashes completed opaque pixels with BLAKE3 (including size
+and transform), reuses retained exact-content matches, and otherwise encodes
+libwebp lossy quality 80/method 0. It writes and syncs a private temporary image,
+publishes and syncs its directory, then returns to the recording thread for a
+generation/monitor/lock check before committing the reference. Interrupted work
+can leave an orphan; startup/hourly cleanup reclaims it. SQLite references never
+intentionally precede durable images.
+
+Raw SHM buffers, including completed work waiting for the single encoder, share
+a 96 MiB budget. Each monitor has at most one outstanding sample. Rotation gives
+outputs fair admission when capacity is tight. Pending samples are recorded as
+missing coverage at the next trigger; ten-second capture stalls are cancelled.
+Neither pending frames nor gaps count as unchanged screens. Focus recording
+continues independently. Pause, lock, suspend, timing boundaries, reconnect and
+monitor changes invalidate delayed results; fresh samples establish new coverage.
+
+Below 20 GiB available on the history filesystem, expired history is cleaned
+first. Screenshot storage then stops if space remains low and resumes only above
+25 GiB. There is no recording-size cap and younger history is retained. `status`
+exposes pressure, desktop/capture errors and screenshot availability; `screenshots`
+lists stable screenshot IDs and per-monitor missing-sample reasons. Its page size
+is 1–500; `image ID` streams a single WebP while recording or offline.
 
 ## Optional desktop startup
 

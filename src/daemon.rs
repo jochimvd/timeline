@@ -78,6 +78,7 @@ pub fn run(directory: &Path) -> Result<()> {
     for signal in [signal_hook::consts::SIGINT, signal_hook::consts::SIGTERM] {
         signal_hook::flag::register(signal, Arc::clone(&stop))?;
     }
+    let mut screenshots = crate::screenshots::Screenshots::new(directory)?;
     let mut source: Option<(Session, Hyprland)> = None;
     let mut retry_at = Instant::now();
     let mut desktop_error: Option<String> = None;
@@ -159,6 +160,7 @@ pub fn run(directory: &Path) -> Result<()> {
         } else {
             recorder.apply(Input::Tick, now()?)?;
         }
+        screenshots.step(&mut recorder, source.as_mut().map(|(session, _)| session))?;
         for _ in 0..4 {
             let (mut stream, _) = match listener.accept() {
                 Ok(client) => client,
@@ -178,7 +180,7 @@ pub fn run(directory: &Path) -> Result<()> {
                     json!({"ok":true})
                 }
                 Ok("status") => {
-                    json!({"recording":recorder.status(), "desktop_error":desktop_error})
+                    json!({"recording":recorder.status(), "desktop_error":desktop_error, "screenshot_error":screenshots.error})
                 }
                 _ => json!({"error":"expected status, pause, or resume followed by a newline"}),
             };

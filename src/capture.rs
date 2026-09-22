@@ -198,3 +198,5 @@ impl Recorder {
         Ok(true)
     }
 }
+
+pub use crate::image_worker::{EncodedCapture, PixelBudget, Pixels, RecordingImages};

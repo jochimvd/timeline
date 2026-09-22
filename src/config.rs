@@ -24,3 +24,5 @@ pub const CAPTURE_INTERVAL_MS: i64 = 5_000;
 pub const RAW_PIXEL_BUDGET: usize = 96 * 1024 * 1024;
 pub const PRESSURE_STOP_BYTES: u64 = 20 * 1024 * 1024 * 1024;
 pub const PRESSURE_RESUME_BYTES: u64 = 25 * 1024 * 1024 * 1024;
+pub const WEBP_QUALITY: f32 = 80.0;
+pub const WEBP_METHOD: i32 = 0;

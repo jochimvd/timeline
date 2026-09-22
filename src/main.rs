@@ -15,7 +15,16 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Run the active-window recorder until interrupted.
+    /// List committed screenshot evidence and missing samples.
+    Screenshots {
+        #[arg(long, default_value_t = 0)]
+        after: i64,
+        #[arg(long, default_value_t = 100)]
+        limit: usize,
+    },
+    /// Stream one retained WebP to stdout; unavailable evidence is an error.
+    Image { id: i64 },
+    /// Run the desktop recorder until interrupted.
     Run,
     /// Inspect recorder state (requires the recorder to be running).
     Status,
@@ -47,6 +56,25 @@ fn main() -> Result<()> {
                     &json!({"observations": observations, "next_after": next_after, "has_more": has_more})
                 )?
             );
+        }
+        Command::Screenshots { after, limit } => {
+            let history = History::read(&directory)?;
+            let screenshots = history.screenshots(after, limit)?;
+            let next_after = screenshots.last().map(|s| s.id).unwrap_or(after);
+            let has_more = !history.screenshots(next_after, 1)?.is_empty();
+            println!(
+                "{}",
+                serde_json::to_string_pretty(
+                    &json!({"screenshots":screenshots,"next_after":next_after,"has_more":has_more})
+                )?
+            );
+        }
+        Command::Image { id } => {
+            let history = History::read(&directory)?;
+            let mut image = history
+                .image(id)?
+                .ok_or_else(|| anyhow::anyhow!("screenshot {id} unavailable or expired"))?;
+            std::io::copy(&mut image, &mut std::io::stdout().lock())?;
         }
         Command::Run => timeline::daemon::run(&directory)?,
         command => {
