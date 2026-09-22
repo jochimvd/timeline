@@ -1,4 +1,5 @@
 //! Recording policy, independent of the compositor, wall clock and UI.
+use crate::config::{CHECKPOINT_INTERVAL_MS, CLEANUP_INTERVAL_MS, RETENTION_MS};
 use crate::history::History;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -47,12 +48,17 @@ pub struct Recorder {
     segment: i64,
     last_commit_ms: i64,
     last_stamp: Stamp,
+    last_cleanup_ms: i64,
+    boot_id: String,
 }
 
 impl Recorder {
     pub fn open(directory: &Path, stamp: Stamp) -> Result<Self> {
         let mut history = History::open(directory)?;
         let previous = history.latest()?;
+        let boot_id = std::fs::read_to_string("/proc/sys/kernel/random/boot_id")?;
+        let retention_now = history.advance_retention_clock(&boot_id, stamp.boot_ms, stamp.unix_ms);
+        history.cleanup_before(retention_now - RETENTION_MS)?;
         let manual_paused = history.manual_paused()?;
         let segment = history.start_segment()?;
         history.append(stamp.unix_ms, stamp.monotonic_ms, segment, json!({
@@ -65,6 +71,8 @@ impl Recorder {
             segment,
             last_commit_ms: stamp.monotonic_ms,
             last_stamp: stamp,
+            last_cleanup_ms: stamp.boot_ms,
+            boot_id,
             status: Status {
                 manual_paused,
                 connected: false,
@@ -85,6 +93,13 @@ impl Recorder {
     }
 
     pub fn apply(&mut self, input: Input, stamp: Stamp) -> Result<()> {
+        let retention_now =
+            self.history
+                .advance_retention_clock(&self.boot_id, stamp.boot_ms, stamp.unix_ms);
+        if stamp.boot_ms - self.last_cleanup_ms >= CLEANUP_INTERVAL_MS {
+            self.history.cleanup_before(retention_now - RETENTION_MS)?;
+            self.last_cleanup_ms = stamp.boot_ms;
+        }
         let elapsed = stamp.monotonic_ms - self.last_stamp.monotonic_ms;
         let boot_elapsed = stamp.boot_ms - self.last_stamp.boot_ms;
         let wall_elapsed = stamp.unix_ms - self.last_stamp.unix_ms;
@@ -164,7 +179,9 @@ impl Recorder {
                 ("disconnect", None)
             }
             Input::Tick => {
-                if !next.focus_known || stamp.monotonic_ms - self.last_commit_ms < 5_000 {
+                if !next.focus_known
+                    || stamp.monotonic_ms - self.last_commit_ms < CHECKPOINT_INTERVAL_MS
+                {
                     return Ok(());
                 }
                 ("checkpoint", None)

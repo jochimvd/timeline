@@ -1,0 +1,17 @@
+[Unit]
+Description=Desktop activity recorder
+PartOf=graphical-session.target
+After=graphical-session.target
+Requisite=graphical-session.target
+
+[Service]
+Type=exec
+ExecStart=%h/.local/bin/timeline run
+Restart=on-failure
+RestartSec=2
+TimeoutStopSec=5
+UMask=0077
+Slice=app-graphical.slice
+
+[Install]
+WantedBy=graphical-session.target

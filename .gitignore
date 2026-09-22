@@ -1,2 +1,10 @@
 /target/
-/.scratch/
+/.scratch/*
+!/.scratch/desktop-recall/
+!/.scratch/desktop-recall-build/
+/.scratch/desktop-recall/*
+!/.scratch/desktop-recall/map.md
+!/.scratch/desktop-recall/issues/
+/.scratch/desktop-recall-build/*
+!/.scratch/desktop-recall-build/spec.md
+!/.scratch/desktop-recall-build/issues/

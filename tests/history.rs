@@ -37,3 +37,20 @@ fn only_one_writer_is_allowed_but_readers_can_inspect_and_retention_never_reuses
     assert!(new_id > old_id);
     assert!(reader.observations(0, 501).is_err());
 }
+
+#[test]
+fn large_evidence_pages_are_bounded_without_losing_pagination() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut history = History::open(directory.path()).unwrap();
+    history
+        .append(100, 1, 1, json!({"title": "a".repeat(600_000)}))
+        .unwrap();
+    history
+        .append(200, 2, 1, json!({"title": "b".repeat(600_000)}))
+        .unwrap();
+    let first = history.observations(0, 500).unwrap();
+    assert_eq!(first.len(), 1);
+    let next = history.observations(first[0].id, 500).unwrap();
+    assert_eq!(next.len(), 1);
+    assert!(next[0].id > first[0].id);
+}

@@ -172,3 +172,73 @@ fn idle_is_an_overlay_and_does_not_end_known_focus() {
     assert!(!recorder.status().idle);
     assert!(recorder.status().focus_known);
 }
+
+#[test]
+fn startup_and_hourly_cleanup_remove_old_metadata_without_losing_pause_state() {
+    let directory = tempfile::tempdir().unwrap();
+    {
+        let mut recorder = Recorder::open(directory.path(), at(0)).unwrap();
+        recorder.apply(Input::Pause, at(1)).unwrap();
+    }
+    let thirty_one_days = 31 * 24 * 60 * 60;
+    let mut recorder = Recorder::open(directory.path(), at(thirty_one_days)).unwrap();
+    assert!(recorder.status().manual_paused);
+    assert!(
+        recorder
+            .history()
+            .observations(0, 100)
+            .unwrap()
+            .iter()
+            .all(|o| o.unix_ms >= at(thirty_one_days - 30 * 86400).unix_ms)
+    );
+    recorder
+        .apply(Input::Tick, at(thirty_one_days * 2))
+        .unwrap();
+    assert!(
+        recorder
+            .history()
+            .observations(0, 100)
+            .unwrap()
+            .iter()
+            .all(|o| o.unix_ms >= at(thirty_one_days * 2 - 30 * 86400).unix_ms)
+    );
+}
+
+#[test]
+fn a_forward_wall_clock_jump_does_not_expire_young_history_even_after_restart() {
+    let directory = tempfile::tempdir().unwrap();
+    let original_id;
+    let jumped = Stamp {
+        unix_ms: 50 * 86400 * 1000,
+        ..at(3601)
+    };
+    {
+        let mut recorder = Recorder::open(directory.path(), at(0)).unwrap();
+        original_id = recorder.history().latest().unwrap().unwrap().id;
+        recorder.apply(Input::Tick, jumped).unwrap();
+        assert!(
+            recorder
+                .history()
+                .observations(0, 100)
+                .unwrap()
+                .iter()
+                .any(|o| o.id == original_id)
+        );
+    }
+    let recorder = Recorder::open(
+        directory.path(),
+        Stamp {
+            unix_ms: jumped.unix_ms + 1000,
+            ..at(3602)
+        },
+    )
+    .unwrap();
+    assert!(
+        recorder
+            .history()
+            .observations(0, 100)
+            .unwrap()
+            .iter()
+            .any(|o| o.id == original_id)
+    );
+}
