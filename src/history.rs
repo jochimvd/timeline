@@ -590,9 +590,11 @@ impl History {
 
     pub fn enable_background_cleanup(&mut self) -> Result<()> {
         if self.cleanup.is_none() {
-            self.cleanup = Some(crate::image_cleanup::ImageCleanup::start(
-                self.directory.clone(),
-            )?);
+            let mut cleanup = crate::image_cleanup::ImageCleanup::start(self.directory.clone())?;
+            // Startup cleanup may have deferred files for another process's
+            // active read. Finish them promptly when its lease is released.
+            cleanup.request()?;
+            self.cleanup = Some(cleanup);
         }
         Ok(())
     }

@@ -150,3 +150,34 @@ fn cleanup_contention_returns_busy_without_waiting_outside_read_admission() {
             .contains("busy")
     );
 }
+
+#[test]
+fn background_cleanup_finishes_reclamation_deferred_by_a_startup_reader() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut history = History::open(dir.path()).unwrap();
+    let prepared = History::prepare_image(dir.path(), b"image").unwrap();
+    let id = history
+        .commit_screenshot(&sample(100, "DP-1"), "pixels", &prepared)
+        .unwrap();
+    drop(prepared);
+    let read = history.image(id).unwrap().unwrap();
+    history.cleanup_before(200).unwrap();
+    history.enable_background_cleanup().unwrap();
+    drop(read);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        history.cleanup_pending().unwrap();
+        if std::fs::read_dir(dir.path().join("images"))
+            .unwrap()
+            .count()
+            == 0
+        {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "startup-deferred image was not reclaimed"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+}
