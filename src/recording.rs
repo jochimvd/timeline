@@ -40,12 +40,14 @@ pub struct Status {
     pub focus: Option<Window>,
     pub focus_known: bool,
     pub screenshot_recording: bool,
+    pub screenshot_pressure: bool,
 }
 
 pub struct Recorder {
-    history: History,
-    status: Status,
-    segment: i64,
+    pub(crate) history: History,
+    pub(crate) capture: crate::capture::CaptureState,
+    pub(crate) status: Status,
+    pub(crate) segment: i64,
     last_commit_ms: i64,
     last_stamp: Stamp,
     last_cleanup_ms: i64,
@@ -68,6 +70,7 @@ impl Recorder {
         }))?;
         Ok(Self {
             history,
+            capture: Default::default(),
             segment,
             last_commit_ms: stamp.monotonic_ms,
             last_stamp: stamp,
@@ -81,6 +84,7 @@ impl Recorder {
                 focus: None,
                 focus_known: false,
                 screenshot_recording: false,
+                screenshot_pressure: false,
             },
         })
     }
@@ -90,6 +94,42 @@ impl Recorder {
     }
     pub fn history(&self) -> &History {
         &self.history
+    }
+
+    /// The probe is an external filesystem seam, allowing deterministic pressure tests.
+    pub fn check_storage_pressure(
+        &mut self,
+        stamp: Stamp,
+        mut available: impl FnMut() -> Result<u64>,
+    ) -> Result<()> {
+        use crate::config::{PRESSURE_RESUME_BYTES, PRESSURE_STOP_BYTES};
+        self.apply(Input::Tick, stamp)?;
+        let mut bytes = available()?;
+        if bytes < PRESSURE_STOP_BYTES {
+            let retention_now =
+                self.history
+                    .advance_retention_clock(&self.boot_id, stamp.boot_ms, stamp.unix_ms);
+            self.history.cleanup_before(retention_now - RETENTION_MS)?;
+            bytes = available()?;
+        }
+        let pressure = if self.capture.pressure {
+            bytes <= PRESSURE_RESUME_BYTES
+        } else {
+            bytes < PRESSURE_STOP_BYTES
+        };
+        if pressure != self.capture.pressure {
+            self.invalidate_captures(
+                if pressure {
+                    "disk_pressure"
+                } else {
+                    "disk_recovered"
+                },
+                stamp,
+            )?;
+            self.capture.pressure = pressure;
+            self.update_capture_status();
+        }
+        Ok(())
     }
 
     pub fn apply(&mut self, input: Input, stamp: Stamp) -> Result<()> {
@@ -115,6 +155,7 @@ impl Recorder {
             None
         };
         if let Some(reason) = discontinuity {
+            self.invalidate_captures(reason, stamp)?;
             let previous = self.history.latest()?;
             self.segment = self.history.start_segment()?;
             self.status.focus = None;
@@ -136,6 +177,18 @@ impl Recorder {
         // a timing boundary. The runtime must obtain a new snapshot instead.
         if discontinuity.is_some() && matches!(input, Input::Focus(_)) {
             return Ok(());
+        }
+        let boundary = match &input {
+            Input::Connected { .. } => Some("connected"),
+            Input::Pause => Some("pause"),
+            Input::Resume => Some("resume"),
+            Input::Locked(true) => Some("lock"),
+            Input::Locked(false) => Some("unlock"),
+            Input::Disconnected => Some("disconnect"),
+            _ => None,
+        };
+        if let Some(reason) = boundary {
+            self.invalidate_captures(reason, stamp)?;
         }
         let mut next = self.status.clone();
         let (kind, paused) = match input {
@@ -200,6 +253,7 @@ impl Recorder {
             paused,
         )?;
         self.status = next;
+        self.update_capture_status();
         self.last_commit_ms = stamp.monotonic_ms;
         Ok(())
     }
