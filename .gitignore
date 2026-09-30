@@ -2,6 +2,9 @@
 /.scratch/*
 !/.scratch/desktop-recall/
 !/.scratch/desktop-recall-build/
+!/.scratch/replay/
+/.scratch/replay/*
+!/.scratch/replay/spec.md
 /.scratch/desktop-recall/*
 !/.scratch/desktop-recall/map.md
 !/.scratch/desktop-recall/issues/
