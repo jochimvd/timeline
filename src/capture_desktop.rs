@@ -25,6 +25,31 @@ use wayland_protocols::ext::{
     },
 };
 
+const SESSION_RETRY_INITIAL: Duration = Duration::from_secs(2);
+const SESSION_RETRY_MAX: Duration = Duration::from_secs(30);
+
+struct SessionRetry {
+    at: Option<Instant>,
+    delay: Duration,
+}
+impl Default for SessionRetry {
+    fn default() -> Self {
+        Self {
+            at: None,
+            delay: SESSION_RETRY_INITIAL,
+        }
+    }
+}
+impl SessionRetry {
+    fn due(&self, now: Instant) -> bool {
+        self.at.is_none_or(|at| now >= at)
+    }
+    fn stopped(&mut self, now: Instant) {
+        self.at = Some(now + self.delay);
+        self.delay = (self.delay * 2).min(SESSION_RETRY_MAX);
+    }
+}
+
 #[derive(Default)]
 struct State {
     outputs: BTreeMap<u32, Output>,
@@ -46,7 +71,25 @@ struct Output {
     formats: Vec<wl_shm::Format>,
     constraints_pending: bool,
     stopped: bool,
+    retry: SessionRetry,
     pending: Option<Pending>,
+}
+impl Output {
+    fn stop_session(&mut self, now: Instant) {
+        // Retire frames before their session and release SHM immediately. Old
+        // constraints must not make the replacement visible before its Done.
+        self.pending.take();
+        if let Some(session) = self.session.take() {
+            session.destroy();
+        }
+        self.width = 0;
+        self.height = 0;
+        self.revision = 0;
+        self.formats.clear();
+        self.constraints_pending = true;
+        self.stopped = true;
+        self.retry.stopped(now);
+    }
 }
 impl Drop for Output {
     fn drop(&mut self) {
@@ -108,21 +151,23 @@ impl DesktopCapture {
                 && capture.state.manager.is_some(),
             "ext SHM screenshot protocols unavailable"
         );
-        capture.create_sessions();
+        capture.create_sessions(Instant::now());
         capture.synchronize()?;
         Ok(capture)
     }
-    fn create_sessions(&mut self) {
+    fn create_sessions(&mut self, now: Instant) {
         let (Some(sources), Some(manager)) = (&self.state.sources, &self.state.manager) else {
             return;
         };
         let handle = self.queue.handle();
         for (id, output) in &mut self.state.outputs {
-            if output.session.is_none() {
+            if output.session.is_none() && output.retry.due(now) {
                 let source = sources.create_source(&output.output, &handle, ());
                 output.session =
                     Some(manager.create_session(&source, manager::Options::empty(), &handle, *id));
                 source.destroy();
+                output.stopped = false;
+                output.constraints_pending = true;
             }
         }
     }
@@ -183,7 +228,7 @@ impl DesktopCapture {
     }
     pub fn poll(&mut self) -> Result<Vec<Captured>> {
         self.pump(0)?;
-        self.create_sessions();
+        self.create_sessions(Instant::now());
         let stamp = crate::daemon::now()?;
         let mut frames = Vec::new();
         for output in self.state.outputs.values_mut() {
@@ -219,6 +264,11 @@ impl DesktopCapture {
                 } else {
                     failure = Some("missing_capture_time_or_transform");
                 }
+            }
+            if failure.is_none() {
+                // A Done announcement alone is insufficient: a session that
+                // immediately stops again must retain its increasing backoff.
+                output.retry = SessionRetry::default();
             }
             frames.push(Captured {
                 request: pending.request.clone(),
@@ -347,6 +397,7 @@ impl Dispatch<wl_registry::WlRegistry, ()> for State {
                                 formats: vec![],
                                 constraints_pending: false,
                                 stopped: false,
+                                retry: SessionRetry::default(),
                                 pending: None,
                             },
                         );
@@ -392,7 +443,7 @@ impl Dispatch<wl_output::WlOutput, u32> for State {
 impl Dispatch<session::ExtImageCopyCaptureSessionV1, u32> for State {
     fn event(
         s: &mut Self,
-        _: &session::ExtImageCopyCaptureSessionV1,
+        session: &session::ExtImageCopyCaptureSessionV1,
         event: session::Event,
         id: &u32,
         _: &Connection,
@@ -401,11 +452,12 @@ impl Dispatch<session::ExtImageCopyCaptureSessionV1, u32> for State {
         let Some(output) = s.outputs.get_mut(id) else {
             return;
         };
+        // A retired session can still have queued events for this output.
+        if output.session.as_ref() != Some(session) {
+            return;
+        }
         match event {
-            session::Event::Stopped => {
-                output.stopped = true;
-                output.pending.take();
-            }
+            session::Event::Stopped => output.stop_session(Instant::now()),
             session::Event::Done => {
                 s.revision += 1;
                 output.revision = s.revision;
@@ -491,3 +543,6 @@ wayland_client::delegate_noop!(State: ignore wl_buffer::WlBuffer);
 wayland_client::delegate_noop!(State: ignore sources::ExtOutputImageCaptureSourceManagerV1);
 wayland_client::delegate_noop!(State: ignore source::ExtImageCaptureSourceV1);
 wayland_client::delegate_noop!(State: ignore manager::ExtImageCopyCaptureManagerV1);
+
+#[cfg(test)]
+mod tests;
