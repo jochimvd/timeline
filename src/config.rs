@@ -26,3 +26,6 @@ pub const PRESSURE_STOP_BYTES: u64 = 20 * 1024 * 1024 * 1024;
 pub const PRESSURE_RESUME_BYTES: u64 = 25 * 1024 * 1024 * 1024;
 pub const WEBP_QUALITY: f32 = 80.0;
 pub const WEBP_METHOD: i32 = 0;
+
+/// IANA timezone used to resolve activity dates in the shared query service.
+pub const ACTIVITY_TIMEZONE: &str = "Europe/Oslo";

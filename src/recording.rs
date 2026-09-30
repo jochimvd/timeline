@@ -1,9 +1,9 @@
 //! Recording policy, independent of the compositor, wall clock and UI.
 use crate::config::{CHECKPOINT_INTERVAL_MS, CLEANUP_INTERVAL_MS, RETENTION_MS};
+use crate::evidence::{BoundaryKind, Evidence, StateChange};
 use crate::history::History;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 use std::path::Path;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -31,18 +31,7 @@ pub enum Input {
     Tick,
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub struct Status {
-    pub manual_paused: bool,
-    pub connected: bool,
-    pub locked: bool,
-    pub idle: bool,
-    pub focus: Option<Window>,
-    pub focus_known: bool,
-    pub screenshot_recording: bool,
-    pub screenshot_pressure: bool,
-    pub screenshot_cleanup: bool,
-}
+pub type Status = crate::evidence::FocusState;
 
 pub struct Recorder {
     pub(crate) history: History,
@@ -65,11 +54,23 @@ impl Recorder {
         let manual_paused = history.manual_paused()?;
         let pressure = history.screenshot_pressure()?;
         let segment = history.start_segment()?;
-        history.append(stamp.unix_ms, stamp.monotonic_ms, segment, json!({
-            "kind": "boundary", "reason": if previous.is_some() { "restart" } else { "startup" },
-            "previous_durable_observation": previous.as_ref().map(|o| o.id),
-            "previous_durable_unix_ms": previous.as_ref().map(|o| o.unix_ms),
-        }))?;
+        history.commit_evidence(
+            stamp.unix_ms,
+            stamp.monotonic_ms,
+            segment,
+            &Evidence::Boundary {
+                kind: BoundaryKind::Boundary,
+                reason: if previous.is_some() {
+                    "restart"
+                } else {
+                    "startup"
+                }
+                .into(),
+                previous_durable_observation: previous.as_ref().map(|o| o.id),
+                previous_durable_unix_ms: previous.as_ref().map(|o| o.unix_ms),
+            },
+            None,
+        )?;
         Ok(Self {
             history,
             capture: crate::capture::CaptureState {
@@ -184,15 +185,17 @@ impl Recorder {
             self.segment = self.history.start_segment()?;
             self.status.focus = None;
             self.status.focus_known = false;
-            self.history.append(
+            self.history.commit_evidence(
                 stamp.unix_ms,
                 stamp.monotonic_ms,
                 self.segment,
-                json!({
-                    "kind": "boundary", "reason": reason,
-                    "previous_durable_observation": previous.as_ref().map(|o| o.id),
-                    "previous_durable_unix_ms": previous.as_ref().map(|o| o.unix_ms),
-                }),
+                &Evidence::Boundary {
+                    kind: BoundaryKind::Boundary,
+                    reason: reason.into(),
+                    previous_durable_observation: previous.as_ref().map(|o| o.id),
+                    previous_durable_unix_ms: previous.as_ref().map(|o| o.unix_ms),
+                },
+                None,
             )?;
             self.last_commit_ms = stamp.monotonic_ms;
         }
@@ -222,7 +225,7 @@ impl Recorder {
                 next.idle = idle;
                 next.focus = None;
                 next.focus_known = false;
-                ("connected", None)
+                (StateChange::Connected, None)
             }
             Input::Focus(focus) => {
                 if next.manual_paused || next.locked || !next.connected {
@@ -230,20 +233,34 @@ impl Recorder {
                 }
                 next.focus = focus;
                 next.focus_known = true;
-                ("focus", None)
+                (StateChange::Focus, None)
             }
             Input::Pause | Input::Resume => {
                 let paused = matches!(input, Input::Pause);
                 next.manual_paused = paused;
                 next.focus = None;
                 next.focus_known = false;
-                (if paused { "pause" } else { "resume" }, Some(paused))
+                (
+                    if paused {
+                        StateChange::Pause
+                    } else {
+                        StateChange::Resume
+                    },
+                    Some(paused),
+                )
             }
             Input::Locked(locked) => {
                 next.locked = locked;
                 next.focus = None;
                 next.focus_known = false;
-                (if locked { "lock" } else { "unlock" }, None)
+                (
+                    if locked {
+                        StateChange::Lock
+                    } else {
+                        StateChange::Unlock
+                    },
+                    None,
+                )
             }
             Input::Idle(idle) => {
                 next.idle = idle;
@@ -251,14 +268,14 @@ impl Recorder {
                     self.status = next;
                     return Ok(());
                 }
-                ("idle", None)
+                (StateChange::Idle, None)
             }
             Input::Disconnected => {
                 next.connected = false;
                 next.locked = true;
                 next.focus = None;
                 next.focus_known = false;
-                ("disconnect", None)
+                (StateChange::Disconnect, None)
             }
             Input::Tick => {
                 if !next.focus_known
@@ -266,14 +283,17 @@ impl Recorder {
                 {
                     return Ok(());
                 }
-                ("checkpoint", None)
+                (StateChange::Checkpoint, None)
             }
         };
-        self.history.commit(
+        self.history.commit_evidence(
             stamp.unix_ms,
             stamp.monotonic_ms,
             self.segment,
-            json!({"kind": kind, "state": next}),
+            &Evidence::State {
+                kind,
+                state: next.clone(),
+            },
             paused,
         )?;
         self.status = next;

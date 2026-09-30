@@ -338,6 +338,48 @@ fn repeated_tiles_within_and_between_images_have_balanced_retention_references()
 }
 
 #[test]
+fn bundle_keys_distinguish_raw_tiles_when_lossy_encoding_produces_identical_payloads() {
+    use timeline::queries::{Client, Queries};
+    // Desktop captures differing slightly at one pixel collapse to the same
+    // lossy encoding here, while their content fingerprints remain distinct.
+    let first = pixels(256, 256, &[[0, 0, 0, 255]]);
+    let candidates = (1..=16).map(|blue| {
+        let mut changed = first.clone();
+        changed[0] = blue;
+        changed
+    });
+    let encoded = timeline::codec::encode_bgra(&first, 256, 256, false).unwrap();
+    let second = candidates
+        .into_iter()
+        .find(|bytes| timeline::codec::encode_bgra(bytes, 256, 256, false).unwrap() == encoded)
+        .expect("fixture needs two distinct raw colors that encode identically");
+    let mut combined = Vec::with_capacity(first.len() + second.len());
+    for row in 0..256 {
+        combined.extend_from_slice(&first[row * 1024..(row + 1) * 1024]);
+        combined.extend_from_slice(&second[row * 1024..(row + 1) * 1024]);
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let mut history = History::open(dir.path()).unwrap();
+    let id = record(&mut history, dir.path(), 100, 512, 256, &combined);
+    assert_eq!(tile_count(dir.path()), 2);
+    let queries = Queries::open(dir.path()).unwrap();
+    let mut bundle = Vec::new();
+    queries
+        .tiles(Client::Browser, id)
+        .unwrap()
+        .stream
+        .read_to_end(&mut bundle)
+        .unwrap();
+    let size = u32::from_le_bytes(bundle[..4].try_into().unwrap()) as usize;
+    let header: serde_json::Value = serde_json::from_slice(&bundle[4..4 + size]).unwrap();
+    assert_eq!(header["tiles"].as_array().unwrap().len(), 2);
+    assert_ne!(header["tiles"][0]["key"], header["tiles"][1]["key"]);
+    assert_eq!(header["map"], serde_json::json!([0, 1]));
+    let payload = &bundle[4 + size..];
+    assert_eq!(&payload[..encoded.len()], &payload[encoded.len()..]);
+}
+
+#[test]
 fn schema_four_upgrade_preserves_pixels_references_and_retention() {
     let dir = tempfile::tempdir().unwrap();
     let mut history = History::open(dir.path()).unwrap();
@@ -375,4 +417,53 @@ fn schema_four_upgrade_preserves_pixels_references_and_retention() {
     );
     history.cleanup_before(200).unwrap();
     assert_eq!(tile_count(dir.path()), 0);
+}
+
+#[test]
+fn previews_bound_dimensions_preserve_full_images_and_cannot_outlive_retention() {
+    use timeline::queries::{Client, Queries};
+    for (width, height) in [(1024, 512), (512, 1024), (257, 259), (1, 1)] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut history = History::open(dir.path()).unwrap();
+        let id = record(
+            &mut history,
+            dir.path(),
+            100,
+            width,
+            height,
+            &pixels(width, height, &[RED, BLUE]),
+        );
+        let original = export(&history, id);
+        let packs = pack_bytes(dir.path());
+        let queries = Queries::open(dir.path()).unwrap();
+        let mut preview = Vec::new();
+        queries
+            .thumbnail(Client::Browser, id)
+            .unwrap()
+            .stream
+            .read_to_end(&mut preview)
+            .unwrap();
+        let (w, h, _) = decode_bgra(&preview).unwrap();
+        assert!(w <= 640 && h <= 640 && w <= width && h <= height);
+        assert!((w as f64 / h as f64 - width as f64 / height as f64).abs() < 0.01);
+        let mut cached = Vec::new();
+        queries
+            .thumbnail(Client::Browser, id)
+            .unwrap()
+            .stream
+            .read_to_end(&mut cached)
+            .unwrap();
+        assert_eq!(cached, preview);
+        assert_eq!(export(&history, id), original);
+        assert_eq!(
+            pack_bytes(dir.path()),
+            packs,
+            "preview generation wrote image data"
+        );
+        history.cleanup_before(200).unwrap();
+        assert!(
+            queries.thumbnail(Client::Browser, id).is_err(),
+            "cache must not serve expired evidence"
+        );
+    }
 }

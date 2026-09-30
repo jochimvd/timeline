@@ -18,3 +18,6 @@ pub mod capture_desktop;
 mod screenshots;
 
 mod image_cleanup;
+
+pub mod evidence;
+pub mod queries;
