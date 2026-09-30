@@ -79,6 +79,8 @@ pub fn run(directory: &Path) -> Result<()> {
     for signal in [signal_hook::consts::SIGINT, signal_hook::consts::SIGTERM] {
         signal_hook::flag::register(signal, Arc::clone(&stop))?;
     }
+    let web = crate::web::Web::new(directory, crate::web::ADDRESS)?;
+    let server = crate::web::start(web.clone(), stop.clone())?;
     let mut screenshots = crate::screenshots::Screenshots::new(directory)?;
     let mut source: Option<(Session, Hyprland)> = None;
     let mut retry_at = Instant::now();
@@ -172,6 +174,12 @@ pub fn run(directory: &Path) -> Result<()> {
             stream.set_write_timeout(Some(Duration::from_millis(50)))?;
             let command = read_command(&mut stream);
             let response = match command.as_deref() {
+                Ok("launch") => match web.launch_url() {
+                    Ok(url) => json!({"url":url}),
+                    Err(_) => {
+                        json!({"error":"browser launch unavailable; retry after pending credentials expire"})
+                    }
+                },
                 Ok("pause") => {
                     recorder.apply(Input::Pause, now()?)?;
                     json!({"ok":true})
@@ -191,6 +199,9 @@ pub fn run(directory: &Path) -> Result<()> {
         thread::sleep(Duration::from_millis(50));
     }
     recorder.apply(Input::Disconnected, now()?)?;
+    server
+        .join()
+        .map_err(|_| anyhow::anyhow!("HTTP server panicked"))??;
     Ok(())
 }
 

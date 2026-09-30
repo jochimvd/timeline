@@ -17,6 +17,10 @@ struct Cli {
 enum Command {
     /// Offline conversion of legacy images into verified packed regions.
     MigrateImages,
+    /// Open an authenticated browser session (one-time credential, valid 60 seconds).
+    Open,
+    /// Print local MCP configuration, including the private bearer credential.
+    McpConfig,
     /// List committed screenshot evidence and missing samples.
     Screenshots {
         #[arg(long, default_value_t = 0)]
@@ -83,6 +87,28 @@ fn main() -> Result<()> {
                 .image(id)?
                 .ok_or_else(|| anyhow::anyhow!("screenshot {id} unavailable or expired"))?;
             std::io::copy(&mut image, &mut std::io::stdout().lock())?;
+        }
+        Command::Open => {
+            let response: serde_json::Value =
+                serde_json::from_str(&timeline::daemon::request(&directory, "launch")?)?;
+            let url = response["url"]
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("missing launch URL"))?;
+            anyhow::ensure!(
+                std::process::Command::new("xdg-open")
+                    .arg(url)
+                    .status()?
+                    .success(),
+                "browser launch failed"
+            );
+        }
+        Command::McpConfig => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(
+                    &json!({"url":format!("http://{}/mcp", timeline::web::ADDRESS),"headers":{"Authorization":format!("Bearer {}", timeline::web::secret(&directory)?)}})
+                )?
+            );
         }
         Command::Run => timeline::daemon::run(&directory)?,
         command => {

@@ -8,3 +8,6 @@
 /.scratch/desktop-recall-build/*
 !/.scratch/desktop-recall-build/spec.md
 !/.scratch/desktop-recall-build/issues/
+
+/node_modules/
+/test-results/

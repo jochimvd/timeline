@@ -1,0 +1,162 @@
+//! Synthetic browser acceptance fixture. Never connects to a desktop or captures it.
+use std::{
+    io::{BufRead, Write},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+};
+use timeline::{
+    history::{History, ScreenshotSample},
+    recording::{Input, Recorder, Stamp, Window},
+    web::Web,
+};
+fn stamp(ms: i64, base: i64) -> Stamp {
+    Stamp {
+        unix_ms: ms,
+        monotonic_ms: ms - base,
+        boot_ms: ms - base,
+    }
+}
+fn main() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let base = 1790042400000; // 2026-09-22 04:00 Europe/Oslo
+    let mut recorder = Recorder::open(dir.path(), stamp(base, base))?;
+    recorder.apply(
+        Input::Connected {
+            locked: false,
+            idle: false,
+        },
+        stamp(base, base),
+    )?;
+    recorder.apply(
+        Input::Focus(Some(Window {
+            address: "a".into(),
+            application: "Editor".into(),
+            title: "<script>Planning notes</script>".into(),
+        })),
+        stamp(base, base),
+    )?;
+    // Frequent checkpoints establish continuous evidence without stall boundaries.
+    for i in 1..=900 {
+        recorder.apply(Input::Tick, stamp(base + i * 4000, base))?;
+    }
+    recorder.apply(Input::Pause, stamp(base + 3600001, base))?;
+    drop(recorder);
+    let mut history = History::open(dir.path())?;
+    let bytes = base64::Engine::decode(
+        &base64::engine::general_purpose::STANDARD,
+        "UklGRiIAAABXRUJQVlA4IBYAAAAwAQCdASoBAAEADsD+JaQAA3AAAAAA",
+    )?;
+    for monitor in ["Display A", "Display B"] {
+        let prepared = History::prepare_image(dir.path(), &bytes)?;
+        history.commit_screenshot(
+            &ScreenshotSample {
+                unix_ms: base,
+                monotonic_ms: 0,
+                segment: 1,
+                monitor: monitor.into(),
+                width: 1,
+                height: 1,
+                transform: 0,
+            },
+            "fixture",
+            &prepared,
+        )?;
+        let image = history.find_image("fixture")?.unwrap();
+        for tick in 1..120 {
+            let sample = ScreenshotSample {
+                unix_ms: base + tick * 5000,
+                monotonic_ms: tick * 5000,
+                segment: 1,
+                monitor: monitor.into(),
+                width: 1,
+                height: 1,
+                transform: 0,
+            };
+            if tick == 60 {
+                history.screenshot_gap(&sample, "fixture_gap")?;
+            } else {
+                history.reuse_screenshot(&sample, &image)?;
+            }
+        }
+    }
+    drop(history);
+    let socket = std::os::unix::net::UnixListener::bind(dir.path().join("control.sock"))?;
+    let stop = Arc::new(AtomicBool::new(false));
+    let control_stop = stop.clone();
+    socket.set_nonblocking(true)?;
+    std::thread::spawn(move || {
+        let mut paused = false;
+        while !control_stop.load(Ordering::Relaxed) {
+            if let Ok((mut stream, _)) = socket.accept() {
+                let mut command = String::new();
+                let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(1)));
+                let _ = std::io::BufReader::new(&stream).read_line(&mut command);
+                match command.trim() {
+                    "pause" => paused = true,
+                    "resume" => paused = false,
+                    _ => (),
+                }
+                let _ = writeln!(
+                    stream,
+                    "{}",
+                    serde_json::json!({"recording":{"manual_paused":paused,"locked":false,"connected":true},"ok":true})
+                );
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    });
+    let web = Web::new(dir.path(), "127.0.0.1:47832")?;
+    let server = timeline::web::start(web.clone(), stop.clone())?;
+    println!("{}", web.launch_url()?);
+    std::io::stdout().flush()?;
+    for input in std::io::stdin().lock().lines() {
+        if input? != "append" {
+            break;
+        }
+        let at = base + 3_605_000;
+        let mut recorder = Recorder::open(dir.path(), stamp(at, base))?;
+        recorder.apply(
+            Input::Connected {
+                locked: false,
+                idle: false,
+            },
+            stamp(at, base),
+        )?;
+        recorder.apply(Input::Resume, stamp(at, base))?;
+        recorder.apply(
+            Input::Focus(Some(Window {
+                address: "live".into(),
+                application: "Browser".into(),
+                title: "Added while open".into(),
+            })),
+            stamp(at, base),
+        )?;
+        for tick in 1..=30 {
+            recorder.apply(Input::Tick, stamp(at + tick * 4000, base))?;
+        }
+        let segment = recorder.history().latest()?.unwrap().segment;
+        drop(recorder);
+        let mut history = History::open(dir.path())?;
+        let prepared = History::prepare_image(dir.path(), &bytes)?;
+        history.commit_screenshot(
+            &ScreenshotSample {
+                unix_ms: at,
+                monotonic_ms: at - base,
+                segment,
+                monitor: "Display C".into(),
+                width: 1,
+                height: 1,
+                transform: 0,
+            },
+            "live-fixture",
+            &prepared,
+        )?;
+        println!("appended");
+        std::io::stdout().flush()?;
+    }
+    stop.store(true, Ordering::Relaxed);
+    server.join().unwrap()?;
+    Ok(())
+}
