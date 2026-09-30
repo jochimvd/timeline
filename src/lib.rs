@@ -1,10 +1,15 @@
 pub mod capture;
+pub mod codec;
 pub mod config;
 pub mod daemon;
 pub mod desktop;
 pub mod history;
+pub mod migration;
 pub mod recording;
 pub mod session;
+mod thumbnails;
+mod tile_map;
+mod tiles;
 
 mod image_worker;
 

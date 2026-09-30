@@ -1,3 +1,4 @@
+mod common;
 use std::io::Read;
 use timeline::history::{History, ScreenshotSample};
 
@@ -17,7 +18,8 @@ fn sample(time: i64, monitor: &str) -> ScreenshotSample {
 fn durable_images_are_independent_evidence_and_shared_until_the_last_reference_expires() {
     let dir = tempfile::tempdir().unwrap();
     let mut history = History::open(dir.path()).unwrap();
-    let prepared = History::prepare_image(dir.path(), b"encoded webp fixture").unwrap();
+    let prepared =
+        History::prepare_image(dir.path(), &common::webp(b"encoded webp fixture")).unwrap();
     let first = history
         .commit_screenshot(&sample(100, "DP-1"), "pixels", &prepared)
         .unwrap();
@@ -34,14 +36,14 @@ fn durable_images_are_independent_evidence_and_shared_until_the_last_reference_e
     assert!(history.image(second).unwrap().is_none());
     let mut bytes = Vec::new();
     read.read_to_end(&mut bytes).unwrap();
-    assert_eq!(bytes, b"encoded webp fixture");
+    assert_eq!(bytes, common::webp(b"encoded webp fixture"));
     drop(read);
     history.cleanup_before(400).unwrap();
     assert!(history.find_image("pixels").unwrap().is_none());
     drop(history);
     let mut history = History::open(dir.path()).unwrap();
     assert!(history.screenshots(0, 100).unwrap().is_empty());
-    let prepared = History::prepare_image(dir.path(), b"new image").unwrap();
+    let prepared = History::prepare_image(dir.path(), &common::webp(b"new image")).unwrap();
     assert!(
         history
             .commit_screenshot(&sample(500, "DP-1"), "new", &prepared)
@@ -54,7 +56,8 @@ fn durable_images_are_independent_evidence_and_shared_until_the_last_reference_e
 fn interrupted_publication_is_reclaimed_but_inflight_preparation_is_protected() {
     let dir = tempfile::tempdir().unwrap();
     let mut history = History::open(dir.path()).unwrap();
-    let prepared = History::prepare_image(dir.path(), b"complete but not committed").unwrap();
+    let prepared =
+        History::prepare_image(dir.path(), &common::webp(b"complete but not committed")).unwrap();
     history.cleanup_before(0).unwrap();
     // Inject failure at the SQLite boundary, after durable file publication.
     let fault = rusqlite::Connection::open(dir.path().join("history.sqlite3")).unwrap();
@@ -69,22 +72,17 @@ fn interrupted_publication_is_reclaimed_but_inflight_preparation_is_protected() 
     drop(prepared);
     drop(history);
     std::fs::write(
-        dir.path().join("images/image-interrupted.part"),
+        dir.path().join("tiles/pack-interrupted.part"),
         b"unfinished",
     )
     .unwrap();
     let mut history = History::open(dir.path()).unwrap();
     history.cleanup_before(0).unwrap();
-    assert_eq!(
-        std::fs::read_dir(dir.path().join("images"))
-            .unwrap()
-            .count(),
-        0
-    );
+    assert_eq!(common::payload_files(dir.path()).len(), 0);
     fault
         .execute_batch("DROP TRIGGER fail_image_commit")
         .unwrap();
-    let prepared = History::prepare_image(dir.path(), b"committed").unwrap();
+    let prepared = History::prepare_image(dir.path(), &common::webp(b"committed")).unwrap();
     history.cleanup_before(0).unwrap();
     let id = history
         .commit_screenshot(&sample(100, "DP-1"), "pixels", &prepared)
@@ -104,7 +102,7 @@ fn interrupted_publication_is_reclaimed_but_inflight_preparation_is_protected() 
 fn image_reads_are_bounded_and_missing_files_do_not_substitute_other_evidence() {
     let dir = tempfile::tempdir().unwrap();
     let mut history = History::open(dir.path()).unwrap();
-    let prepared = History::prepare_image(dir.path(), b"fixture").unwrap();
+    let prepared = History::prepare_image(dir.path(), &common::webp(b"fixture")).unwrap();
     let id = history
         .commit_screenshot(&sample(100, "DP-1"), "pixels", &prepared)
         .unwrap();
@@ -115,8 +113,7 @@ fn image_reads_are_bounded_and_missing_files_do_not_substitute_other_evidence() 
     assert!(reader.image(id).err().unwrap().to_string().contains("busy"));
     drop(a);
     drop(b);
-    let name = history.screenshots(0, 1).unwrap()[0].image.clone().unwrap();
-    std::fs::remove_file(dir.path().join("images").join(name)).unwrap();
+    common::remove_packs(dir.path());
     assert!(reader.image(id).unwrap().is_none());
     assert!(reader.screenshots(0, 501).is_err());
 }
@@ -125,7 +122,7 @@ fn image_reads_are_bounded_and_missing_files_do_not_substitute_other_evidence() 
 fn cleanup_contention_returns_busy_without_waiting_outside_read_admission() {
     let dir = tempfile::tempdir().unwrap();
     let mut history = History::open(dir.path()).unwrap();
-    let image = History::prepare_image(dir.path(), b"image").unwrap();
+    let image = History::prepare_image(dir.path(), &common::webp(b"image")).unwrap();
     let id = history
         .commit_screenshot(&sample(100, "DP-1"), "pixels", &image)
         .unwrap();
@@ -155,7 +152,7 @@ fn cleanup_contention_returns_busy_without_waiting_outside_read_admission() {
 fn background_cleanup_finishes_reclamation_deferred_by_a_startup_reader() {
     let dir = tempfile::tempdir().unwrap();
     let mut history = History::open(dir.path()).unwrap();
-    let prepared = History::prepare_image(dir.path(), b"image").unwrap();
+    let prepared = History::prepare_image(dir.path(), &common::webp(b"image")).unwrap();
     let id = history
         .commit_screenshot(&sample(100, "DP-1"), "pixels", &prepared)
         .unwrap();
@@ -167,11 +164,7 @@ fn background_cleanup_finishes_reclamation_deferred_by_a_startup_reader() {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
     loop {
         history.cleanup_pending().unwrap();
-        if std::fs::read_dir(dir.path().join("images"))
-            .unwrap()
-            .count()
-            == 0
-        {
+        if common::payload_files(dir.path()).is_empty() {
             break;
         }
         assert!(

@@ -1,3 +1,4 @@
+mod common;
 use timeline::{
     capture::{CaptureTrigger, Monitor},
     recording::{Input, Recorder, Stamp},
@@ -67,7 +68,7 @@ fn delayed_encoded_images_never_cross_recording_or_monitor_boundaries() {
         r.set_monitors(vec![monitor("DP-1"), monitor("DP-2")], at(0))
             .unwrap();
         let requests = r.request_captures(CaptureTrigger::Timer, at(0)).unwrap();
-        let prepared = History::prepare_image(dir.path(), b"encoded").unwrap();
+        let prepared = History::prepare_image(dir.path(), &common::webp(b"encoded")).unwrap();
         match boundary {
             0 => r.apply(Input::Pause, at(1)).unwrap(),
             1 => r.apply(Input::Locked(true), at(1)).unwrap(),
@@ -280,7 +281,7 @@ fn background_reclamation_does_not_block_metadata_and_pressure_waits_for_cleanup
     // Real orphan files plus a real active-read lease hold cleanup open.
     for index in 0..1000 {
         std::fs::write(
-            dir.path().join(format!("images/image-orphan-{index}.part")),
+            dir.path().join(format!("tiles/pack-orphan-{index}.part")),
             b"interrupted",
         )
         .unwrap();
@@ -310,12 +311,7 @@ fn background_reclamation_does_not_block_metadata_and_pressure_waits_for_cleanup
     }
     assert!(!r.status().screenshot_pressure);
     assert!(r.status().screenshot_recording);
-    assert_eq!(
-        std::fs::read_dir(dir.path().join("images"))
-            .unwrap()
-            .count(),
-        0
-    );
+    assert_eq!(common::payload_files(dir.path()).len(), 0);
 }
 
 #[test]

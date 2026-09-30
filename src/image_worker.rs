@@ -4,7 +4,7 @@ use crate::{
     config,
     history::{History, PreparedImage},
 };
-use anyhow::{Context, Result, ensure};
+use anyhow::{Result, ensure};
 use memmap2::MmapMut;
 use std::{
     fs::File,
@@ -126,14 +126,16 @@ impl RecordingImages {
                         hasher.update(&pixels.map);
                         let fingerprint = hasher.finalize().to_hex().to_string();
                         let history = History::read(&directory)?;
-                        if let Some(name) = history.find_image(&fingerprint)?
-                            && directory.join("images").join(name).is_file()
-                        {
+                        if history.find_image(&fingerprint)?.is_some() {
                             return Ok((fingerprint, None));
                         }
-                        let encoded = encode(&pixels)?;
                         ensure!(available()? >= config::PRESSURE_STOP_BYTES, "disk_pressure");
-                        let prepared = History::prepare_image(&directory, &encoded)?;
+                        let prepared = History::prepare_pixels(
+                            &directory,
+                            pixels.width,
+                            pixels.height,
+                            &pixels.map,
+                        )?;
                         Ok((fingerprint, Some(prepared)))
                     })();
                     drop(pixels);
@@ -172,47 +174,4 @@ impl RecordingImages {
             Err(error) => Err(error.into()),
         }
     }
-}
-
-unsafe extern "C" {
-    fn timeline_encode(
-        bgra: *const u8,
-        width: i32,
-        height: i32,
-        quality: f32,
-        method: i32,
-        output: *mut *mut u8,
-    ) -> usize;
-    fn WebPFree(pointer: *mut std::ffi::c_void);
-}
-fn encode(pixels: &Pixels) -> Result<Vec<u8>> {
-    let mut output = std::ptr::null_mut();
-    let size = unsafe {
-        timeline_encode(
-            pixels.map.as_ptr(),
-            pixels.width as i32,
-            pixels.height as i32,
-            config::WEBP_QUALITY,
-            config::WEBP_METHOD,
-            &mut output,
-        )
-    };
-    struct Encoded(*mut u8);
-    impl Drop for Encoded {
-        fn drop(&mut self) {
-            unsafe { WebPFree(self.0.cast()) };
-        }
-    }
-    let encoded = Encoded(output);
-    ensure!(
-        size > 0 && size <= 64 * 1024 * 1024,
-        "WebP encoding failed or exceeded size limit"
-    );
-    let bytes = unsafe { std::slice::from_raw_parts(encoded.0, size) };
-    let mut result = Vec::new();
-    result
-        .try_reserve_exact(size)
-        .context("encoded image allocation failed")?;
-    result.extend_from_slice(bytes);
-    Ok(result)
 }

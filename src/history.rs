@@ -21,8 +21,8 @@ pub struct Observation {
 }
 
 pub struct History {
-    connection: Connection,
-    directory: PathBuf,
+    pub(crate) connection: Connection,
+    pub(crate) directory: PathBuf,
     cleanup: Option<crate::image_cleanup::ImageCleanup>,
     _writer_lock: Option<File>,
     retention_clock: Option<RetentionClock>,
@@ -58,7 +58,10 @@ impl History {
         let connection = Connection::open(directory.join("history.sqlite3"))?;
         connection.busy_timeout(Duration::from_millis(500))?;
         let version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-        ensure!(version <= 3, "history schema is newer than this recorder");
+        ensure!(
+            matches!(version, 0 | 4 | 5),
+            "unsupported history schema {version}; run timeline migrate-images while recorder is stopped"
+        );
         connection.execute_batch(
             "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;
             CREATE TABLE IF NOT EXISTS observations (
@@ -74,17 +77,6 @@ impl History {
             CREATE INDEX IF NOT EXISTS observations_by_time ON observations(unix_ms);
             CREATE TABLE IF NOT EXISTS retention_clock (id INTEGER PRIMARY KEY CHECK(id=1), value TEXT NOT NULL);",
         )?;
-        if version == 1 {
-            connection.execute_batch(
-                "BEGIN IMMEDIATE;
-                ALTER TABLE observations ADD COLUMN retention_ms INTEGER NOT NULL DEFAULT 0;
-                UPDATE observations SET retention_ms=unix_ms;
-                PRAGMA user_version=2;
-                COMMIT;",
-            )?;
-        } else {
-            connection.execute_batch("PRAGMA user_version=2;")?;
-        }
         connection.execute_batch(
             "CREATE INDEX IF NOT EXISTS observations_by_retention ON observations(retention_ms);",
         )?;
@@ -100,7 +92,8 @@ impl History {
             directory.join("history.sqlite3"),
             fs::Permissions::from_mode(0o600),
         )?;
-        Self::initialize_images(directory, &connection)?;
+        crate::tile_map::upgrade(&connection)?;
+        crate::tiles::initialize(directory, &connection)?;
         Ok(Self {
             connection,
             directory: directory.to_owned(),
@@ -116,8 +109,9 @@ impl History {
             OpenFlags::SQLITE_OPEN_READ_ONLY,
         )?;
         connection.busy_timeout(Duration::from_millis(500))?;
+        connection.execute_batch("PRAGMA cache_size=-4096; PRAGMA temp_store=FILE;")?;
         let version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-        ensure!(version == 3, "unsupported history schema version {version}");
+        ensure!(version == 5, "unsupported history schema version {version}");
         Ok(Self {
             connection,
             directory: directory.to_owned(),
@@ -135,15 +129,14 @@ impl History {
         )?;
         // Only images touched by this expiry can lose their final reference.
         // Avoid a full retained-image table scan on the metadata event thread.
-        transaction.execute(
-            "DELETE FROM images WHERE name IN (SELECT image FROM screenshots WHERE retention_ms < ?1 AND image IS NOT NULL)
-             AND NOT EXISTS (SELECT 1 FROM screenshots WHERE image=images.name AND retention_ms >= ?1)",
-            [cutoff_retention_ms],
-        )?;
-        transaction.execute(
+        crate::tiles::expire_images(&transaction, cutoff_retention_ms)?;
+        let screenshot_count = transaction.execute(
             "DELETE FROM screenshots WHERE retention_ms < ?1",
             [cutoff_retention_ms],
         )?;
+        if count > 0 || screenshot_count > 0 {
+            transaction.execute("INSERT INTO state VALUES ('retention_epoch',1) ON CONFLICT(key) DO UPDATE SET value=value+1", [])?;
+        }
         transaction.commit()?;
         if let Some(cleanup) = &mut self.cleanup {
             cleanup.request()?;
@@ -293,7 +286,7 @@ impl History {
     }
 }
 
-const MAX_IMAGE_BYTES: u64 = 64 * 1024 * 1024;
+pub use crate::tiles::{ImageRead, PreparedImage};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScreenshotSample {
@@ -316,88 +309,7 @@ pub struct Screenshot {
     pub unavailable: Option<String>,
 }
 
-/// Owns a durable file and a shared publication lease until reference commit.
-/// Dropping an uncommitted preparation leaves an orphan for periodic recovery.
-pub struct PreparedImage {
-    name: String,
-    directory: PathBuf,
-    _lease: File,
-}
-
-pub struct ImageRead {
-    file: std::io::Take<File>,
-    _lease: File,
-    _slot: File,
-}
-impl std::io::Read for ImageRead {
-    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
-        std::io::Read::read(&mut self.file, buffer)
-    }
-}
-
 impl History {
-    fn initialize_images(directory: &Path, connection: &Connection) -> Result<()> {
-        fs::create_dir_all(directory.join("images"))?;
-        fs::set_permissions(directory.join("images"), fs::Permissions::from_mode(0o700))?;
-        for name in ["images.lock", "image-read-0.lock", "image-read-1.lock"] {
-            OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(false)
-                .mode(0o600)
-                .open(directory.join(name))?;
-        }
-        connection.execute_batch(
-            "CREATE TABLE IF NOT EXISTS images (name TEXT PRIMARY KEY, fingerprint TEXT NOT NULL);
-            CREATE INDEX IF NOT EXISTS images_by_fingerprint ON images(fingerprint);
-            CREATE TABLE IF NOT EXISTS screenshots (
-                id INTEGER PRIMARY KEY AUTOINCREMENT, unix_ms INTEGER NOT NULL,
-                monotonic_ms INTEGER NOT NULL, segment INTEGER NOT NULL, monitor TEXT NOT NULL,
-                width INTEGER NOT NULL, height INTEGER NOT NULL, transform INTEGER NOT NULL,
-                image TEXT, unavailable TEXT, retention_ms INTEGER NOT NULL);
-            CREATE INDEX IF NOT EXISTS screenshots_by_retention ON screenshots(retention_ms);
-            CREATE INDEX IF NOT EXISTS screenshots_by_image ON screenshots(image);
-            PRAGMA user_version=3;",
-        )?;
-        Ok(())
-    }
-
-    fn image_lease(directory: &Path) -> Result<File> {
-        let lease = File::open(directory.join("images.lock"))?;
-        lease.lock_shared()?;
-        Ok(lease)
-    }
-
-    /// Runs on the image worker. File and directory sync precede reference publication.
-    pub fn prepare_image(directory: &Path, bytes: &[u8]) -> Result<PreparedImage> {
-        use std::io::Write;
-        ensure!(
-            !bytes.is_empty() && bytes.len() as u64 <= MAX_IMAGE_BYTES,
-            "invalid image size"
-        );
-        let lease = Self::image_lease(directory)?;
-        let mut temporary = tempfile::Builder::new()
-            .prefix("image-")
-            .suffix(".part")
-            .tempfile_in(directory.join("images"))?;
-        temporary.write_all(bytes)?;
-        temporary.as_file().sync_all()?;
-        let name = temporary
-            .path()
-            .file_stem()
-            .unwrap()
-            .to_string_lossy()
-            .to_string()
-            + ".webp";
-        temporary.persist_noclobber(directory.join("images").join(&name))?;
-        File::open(directory.join("images"))?.sync_all()?;
-        Ok(PreparedImage {
-            name,
-            directory: directory.to_owned(),
-            _lease: lease,
-        })
-    }
-
     pub fn commit_screenshot(
         &mut self,
         sample: &ScreenshotSample,
@@ -408,7 +320,17 @@ impl History {
             self.directory == image.directory,
             "image belongs to another history"
         );
-        self.insert_screenshot(sample, Some(&image.name), None, Some(fingerprint))
+        let tx = self.connection.transaction()?;
+        let name = image.publish(&tx, sample, fingerprint)?;
+        let id = Self::insert_sample(
+            &tx,
+            sample,
+            Some(&name),
+            None,
+            self.retention_clock.as_ref(),
+        )?;
+        tx.commit()?;
+        Ok(id)
     }
 
     pub fn find_image(&self, fingerprint: &str) -> Result<Option<String>> {
@@ -433,19 +355,23 @@ impl History {
             [image],
             |row| row.get(0),
         )?;
-        if !exists || !self.directory.join("images").join(image).is_file() {
+        if !exists {
             return Ok(None);
         }
-        Ok(Some(self.insert_screenshot(
-            sample,
-            Some(image),
-            None,
-            None,
-        )?))
+        let dimensions: (u32, u32) = self.connection.query_row(
+            "SELECT width,height FROM images WHERE name=?1",
+            [image],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        ensure!(
+            dimensions == (sample.width, sample.height),
+            "reused image dimensions mismatch"
+        );
+        Ok(Some(self.insert_screenshot(sample, Some(image), None)?))
     }
 
     pub fn screenshot_gap(&mut self, sample: &ScreenshotSample, reason: &str) -> Result<i64> {
-        self.insert_screenshot(sample, None, Some(reason), None)
+        self.insert_screenshot(sample, None, Some(reason))
     }
 
     fn insert_screenshot(
@@ -453,26 +379,30 @@ impl History {
         sample: &ScreenshotSample,
         image: Option<&str>,
         reason: Option<&str>,
-        fingerprint: Option<&str>,
+    ) -> Result<i64> {
+        let tx = self.connection.transaction()?;
+        let id = Self::insert_sample(&tx, sample, image, reason, self.retention_clock.as_ref())?;
+        tx.commit()?;
+        Ok(id)
+    }
+
+    fn insert_sample(
+        tx: &rusqlite::Transaction<'_>,
+        sample: &ScreenshotSample,
+        image: Option<&str>,
+        reason: Option<&str>,
+        clock: Option<&RetentionClock>,
     ) -> Result<i64> {
         ensure!(
             sample.monitor.len() <= 256 && reason.is_none_or(|v| v.len() <= 1024),
             "screenshot evidence exceeds limits"
         );
-        let tx = self.connection.transaction()?;
-        if let Some(fingerprint) = fingerprint {
-            tx.execute(
-                "INSERT INTO images VALUES (?1, ?2)",
-                params![image, fingerprint],
-            )?;
-        }
         tx.execute("INSERT INTO screenshots(unix_ms,monotonic_ms,segment,monitor,width,height,transform,image,unavailable,retention_ms) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
-            params![sample.unix_ms,sample.monotonic_ms,sample.segment,sample.monitor,sample.width,sample.height,sample.transform,image,reason,self.retention_clock.as_ref().map(|c| c.age_ms).unwrap_or(sample.unix_ms)])?;
+            params![sample.unix_ms,sample.monotonic_ms,sample.segment,sample.monitor,sample.width,sample.height,sample.transform,image,reason,clock.map(|c| c.age_ms).unwrap_or(sample.unix_ms)])?;
         let id = tx.last_insert_rowid();
-        if let Some(clock) = &self.retention_clock {
+        if let Some(clock) = clock {
             tx.execute("INSERT INTO retention_clock VALUES (1,?1) ON CONFLICT(id) DO UPDATE SET value=excluded.value", [serde_json::to_string(clock)?])?;
         }
-        tx.commit()?;
         Ok(id)
     }
 
@@ -499,93 +429,6 @@ impl History {
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
-    }
-
-    /// Two cross-process admission slots, no waiting queue. The shared lease
-    /// defers physical reclamation while admitted reads stream bounded files.
-    pub fn image(&self, id: i64) -> Result<Option<ImageRead>> {
-        use std::io::Read;
-        ensure!(id > 0, "invalid screenshot identifier");
-        let mut slot = None;
-        for index in 0..2 {
-            let file = File::open(self.directory.join(format!("image-read-{index}.lock")))?;
-            match file.try_lock() {
-                Ok(()) => {
-                    slot = Some(file);
-                    break;
-                }
-                Err(std::fs::TryLockError::WouldBlock) => (),
-                Err(error) => return Err(error.into()),
-            }
-        }
-        let slot = slot.context("image reads busy")?;
-        let lease = File::open(self.directory.join("images.lock"))?;
-        lease.try_lock_shared().context("image cleanup busy")?;
-        let name: Option<Option<String>> = self
-            .connection
-            .query_row("SELECT image FROM screenshots WHERE id=?1", [id], |row| {
-                row.get(0)
-            })
-            .optional()?;
-        let Some(name) = name.flatten() else {
-            return Ok(None);
-        };
-        let file = match File::open(self.directory.join("images").join(name)) {
-            Ok(file) => file,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => return Err(error.into()),
-        };
-        ensure!(
-            file.metadata()?.len() <= MAX_IMAGE_BYTES,
-            "stored image exceeds read limit"
-        );
-        Ok(Some(ImageRead {
-            file: file.take(MAX_IMAGE_BYTES),
-            _lease: lease,
-            _slot: slot,
-        }))
-    }
-
-    /// Background reclamation never holds the deletion lease across a directory
-    /// scan. Each file gets one bounded critical section, protecting publication.
-    pub(crate) fn reclaim_images(&self, stop: &std::sync::atomic::AtomicBool) -> Result<bool> {
-        use std::sync::atomic::Ordering;
-        let mut complete = true;
-        for entry in fs::read_dir(self.directory.join("images"))? {
-            if stop.load(Ordering::Relaxed) {
-                return Ok(false);
-            }
-            let entry = entry?;
-            let name = entry.file_name();
-            let name = name.to_string_lossy();
-            if !name.starts_with("image-") || !(name.ends_with(".part") || name.ends_with(".webp"))
-            {
-                continue;
-            }
-            let lease = File::open(self.directory.join("images.lock"))?;
-            match lease.try_lock() {
-                Ok(()) => (),
-                Err(std::fs::TryLockError::WouldBlock) => {
-                    complete = false;
-                    continue;
-                }
-                Err(error) => return Err(error.into()),
-            }
-            let retained: bool = self.connection.query_row(
-                "SELECT EXISTS(SELECT 1 FROM images WHERE name=?1)",
-                [&*name],
-                |row| row.get(0),
-            )?;
-            if !retained {
-                match fs::remove_file(entry.path()) {
-                    Ok(()) => (),
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
-                    Err(error) => return Err(error.into()),
-                }
-            }
-        }
-        File::open(self.directory.join("images"))?.sync_all()?;
-        Ok(complete)
     }
 
     pub fn enable_background_cleanup(&mut self) -> Result<()> {

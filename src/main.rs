@@ -15,6 +15,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Offline conversion of legacy images into verified packed regions.
+    MigrateImages,
     /// List committed screenshot evidence and missing samples.
     Screenshots {
         #[arg(long, default_value_t = 0)]
@@ -45,6 +47,12 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     let directory = config::history_directory()?;
     match cli.command {
+        Command::MigrateImages => {
+            println!(
+                "{}",
+                serde_json::to_string(&timeline::migration::migrate(&directory)?)?
+            );
+        }
         Command::Observations { after, limit } => {
             let history = History::read(&directory)?;
             let observations = history.observations(after, limit)?;

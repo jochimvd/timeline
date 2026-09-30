@@ -1,3 +1,4 @@
+mod common;
 use std::process::Command;
 use timeline::recording::{Input, Recorder, Stamp, Window};
 
@@ -128,7 +129,7 @@ fn screenshot_inspection_streams_only_the_requested_retained_identifier() {
     let root = tempfile::tempdir().unwrap();
     let dir = root.path().join("timeline");
     let mut history = History::open(&dir).unwrap();
-    let image = History::prepare_image(&dir, b"encoded fixture").unwrap();
+    let image = History::prepare_image(&dir, &common::webp(b"encoded fixture")).unwrap();
     let sample = ScreenshotSample {
         unix_ms: 100,
         monotonic_ms: 1,
@@ -155,7 +156,7 @@ fn screenshot_inspection_streams_only_the_requested_retained_identifier() {
     assert_eq!(page["has_more"], false);
     let output = call(&["image", &id.to_string()]);
     assert!(output.status.success());
-    assert_eq!(output.stdout, b"encoded fixture");
+    assert_eq!(output.stdout, common::webp(b"encoded fixture"));
     drop(image);
     history.cleanup_before(200).unwrap();
     let output = call(&["image", &id.to_string()]);
