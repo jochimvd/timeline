@@ -87,3 +87,19 @@ export type CategoryList = {
   categories: { name: string; color: string | null; palette: number | null; rules: CategoryRule[] }[];
   problem: string | null;
 };
+
+/** Per-day focus by category or application; see README "Day evidence". */
+export type CategoryFocus = { category: string | null; focus_ms: number; active_ms: number };
+export type ApplicationFocus = { application: string; focus_ms: number; active_ms: number };
+export type EvidenceKind = "observed" | "gap" | "unknown";
+export type DayEvidence = {
+  observed_ms: number; gap_ms: number; unknown_ms: number;
+  intervals: { range: Range; kind: EvidenceKind; reason?: string }[];
+};
+export type DayFocusMetrics = {
+  date: string; range: Range;
+  totals: { focus_ms: number; no_focus_ms: number; idle_ms: number };
+  categories: CategoryFocus[]; applications: ApplicationFocus[];
+  evidence: DayEvidence; metrics: FocusMetrics;
+};
+export type FocusMetricsByDay = { resolved: { range: Range; timezone: string }; days: DayFocusMetrics[] };

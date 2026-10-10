@@ -33,7 +33,7 @@
     <details class="breakdown-details hourly-details">
       <summary>Switches by hour <span class="muted">({hours.length})</span></summary>
       <div class="table-scroll">
-        <table class="hourly-table" id="hourly-switches">
+        <table class="data-table" id="hourly-switches">
           <thead>
             <tr><th scope="col">Hour</th><th scope="col">Active focus</th><th scope="col">Application switches</th>
               {#if categorized}<th scope="col">Category switches</th>{/if}</tr>

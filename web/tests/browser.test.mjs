@@ -754,3 +754,90 @@ test("bundled browser with real history, calendar, lanes, breakdown, monitors an
       await new Promise((resolve) => fixture.once("exit", resolve));
   }
 });
+
+test("week and month views summarize days, compare honestly and drill into the day view", async () => {
+  const fixture = spawn("cargo", ["run", "--quiet", "--example", "web_fixture"], { stdio: ["pipe", "pipe", "inherit"] });
+  const browser = await chromium.launch({ headless: true });
+  try {
+    const lines = createInterface({ input: fixture.stdout });
+    const url = await new Promise((resolve, reject) => {
+      lines.once("line", resolve);
+      fixture.once("exit", (code) => reject(new Error(`Fixture exited ${code}`)));
+    });
+    const page = await (await browser.newContext({ viewport: { width: 1440, height: 1000 } })).newPage();
+    const errors = [];
+    page.on("pageerror", (e) => errors.push(e.message));
+    await page.clock.setFixedTime(new Date("2026-09-23T12:00:00Z"));
+    // A linked week survives the credential exchange, normalized to its Monday.
+    const launch = new URL(url);
+    await page.goto(`${launch.origin}/?view=week&date=2026-09-23${launch.hash}`);
+    await page.waitForFunction(() => document.querySelector("#period-totals"));
+    assert.equal(new URL(page.url()).search, "?view=week&date=2026-09-21");
+    assert.equal(await page.locator(".view-switch [aria-current=page]").innerText(), "Week");
+    assert.match(await page.locator("#period-heading").innerText(), /Week of 21–27 Sept 2026/);
+    assert.match(await page.title(), /Week of 21–27 Sept 2026/);
+    assert.equal(await page.locator("#images").count(), 0, "the day view is not loaded behind a week");
+
+    // One hour of Planning on Tuesday; Monday has no evidence; Thursday onwards has not begun.
+    await page.waitForFunction(() => !document.querySelector("#period-focus").textContent.includes("Comparing"));
+    assert.match(await page.locator("#period-focus").innerText(), /1h[\s\S]*No evidence last week/);
+    assert.match(await page.locator("#period-evidence").innerText(), /1 of 3 days with evidence \(none on Mon 21 Sept, Wed 23 Sept\)[\s\S]*Last week: no evidence/);
+    const states = await page.locator(".day-column").evaluateAll(columns => columns.map(column => column.className.replace("day-column ", "")));
+    assert.deepEqual(states, ["missing", "recorded", "missing today", "future", "future", "future", "future"]);
+    assert.match(await page.locator(".day-column").nth(1).getAttribute("aria-label"), /Tue 22 Sept: 1h recorded focus, Editor 1h/);
+    await page.locator("#color-by label", { hasText: "Category" }).click();
+    assert.match(await page.locator(".daily-chart .legend").innerText(), /Planning/);
+    assert.match(await page.locator("#subject-comparison").innerText(), /Planning\s+1h/);
+    assert.match(await page.locator(".day-column .segment").first().getAttribute("style"), /var\(--series-1\)/,
+      "categories keep their palette slot in every view");
+    await page.locator("#color-by label", { hasText: "Application" }).click();
+    await page.locator(".day-column").nth(1).hover();
+    assert.match(await page.locator("#daily-tooltip").innerText(), /1h\s+Editor[\s\S]*1h\s+Recorded focus/);
+    await page.locator("summary", { hasText: "Daily totals table" }).click();
+    assert.match(await page.locator("#daily-table tbody tr").nth(1).innerText(), /Tue 22 Sept\s+1h\s+0 min\s+1h\s+1h/);
+    const heatRow = page.locator(".heatmap-row").nth(2);
+    assert.match(await heatRow.locator(".heat-cell").first().getAttribute("aria-label"), /Tue 22 Sept 04:00–05:00: 1h active focus/);
+
+    // Keyboard: arrows move between days, Shift+arrows change week, Home returns.
+    await page.locator(".day-column").nth(1).focus();
+    await page.keyboard.press("ArrowRight");
+    assert.equal(await page.evaluate(() => document.activeElement.getAttribute("aria-label")).then(label => label.startsWith("Wed 23 Sept")), true);
+    await page.keyboard.press("Shift+ArrowLeft");
+    await page.waitForFunction(() => location.search === "?view=week&date=2026-09-14"
+      && document.querySelector(".period-panel").getAttribute("aria-busy") === "false");
+    assert.equal(await page.locator("#period-current").isEnabled(), true);
+    await page.locator(".day-column").first().focus();
+    await page.keyboard.press("Home");
+    await page.waitForFunction(() => location.search === "?view=week&date=2026-09-21");
+
+    // A heatmap hour opens its day with the hour marked; Back returns to the week.
+    await page.waitForFunction(() => document.querySelector(".period-panel").getAttribute("aria-busy") === "false");
+    await heatRow.locator(".heat-cell").first().click();
+    await page.waitForFunction(() => document.querySelector("#stretch-highlight") && document.querySelector("#date")?.value === "2026-09-22");
+    assert.equal(new URL(page.url()).search, "?date=2026-09-22");
+    assert.equal(await page.evaluate(() => document.activeElement.id), "timeline");
+    await page.goBack();
+    await page.waitForFunction(() => location.search === "?view=week&date=2026-09-21" && document.querySelector("#period-totals"));
+    await page.locator(".day-column").nth(1).click();
+    await page.waitForFunction(() => document.querySelector("#date")?.value === "2026-09-22"
+      && document.querySelector("#timeline").getAttribute("aria-busy") === "false");
+    await page.locator("#next").click();
+    await page.waitForFunction(() => location.search === "?date=2026-09-23", "day navigation keeps the URL current");
+    await page.reload();
+    await page.waitForFunction(() => document.querySelector("#date")?.value === "2026-09-23");
+
+    await page.locator(".view-switch a", { hasText: "Month" }).click();
+    await page.waitForFunction(() => location.search === "?view=month&date=2026-09-01" && document.querySelector("#period-totals"));
+    assert.match(await page.locator("#period-heading").innerText(), /September 2026/);
+    assert.equal(await page.locator(".day-column").count(), 30);
+    assert.equal(await page.locator(".heatmap-row").count(), 1 + 23, "hour labels and days that have begun");
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.waitForTimeout(200);
+    assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), "the month fits a narrow screen");
+    assert.deepEqual(errors, []);
+  } finally {
+    await browser.close();
+    fixture.stdin.end("\n");
+    if (fixture.exitCode === null) await new Promise((resolve) => fixture.once("exit", resolve));
+  }
+});

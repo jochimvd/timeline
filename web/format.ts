@@ -9,7 +9,7 @@ export function duration(ms: number) {
 }
 // Intl formatter construction is expensive; labels share one per timezone and style.
 const formatters = new Map<string, Intl.DateTimeFormat>();
-function formatter(timezone: string, style: string, options: Intl.DateTimeFormatOptions) {
+export function formatter(timezone: string, style: string, options: Intl.DateTimeFormatOptions) {
   const key = style + " " + timezone;
   let cached = formatters.get(key);
   if (!cached) formatters.set(key, cached = new Intl.DateTimeFormat("en-GB", { timeZone: timezone, ...options }));

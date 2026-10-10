@@ -1,6 +1,6 @@
 //! Synthetic browser acceptance fixture. Never connects to a desktop or captures it.
 //!
-//! `cargo run --example web_fixture -- --demo [address]` instead serves a week
+//! `cargo run --example web_fixture -- --demo [address]` instead serves three weeks
 //! of varied synthetic focus with demo categories, for looking at the UI.
 use std::{
     io::{BufRead, Write},
@@ -228,10 +228,12 @@ name = "Browsing"
 application = "firefox"
 "#;
 
-/// Seven activity days ending today, 09:00–17:30 local, with lunch pauses,
-/// idle periods and brief glances at chat. Deterministic, so screenshots of the UI are comparable.
+/// Three weeks of activity days ending today: weekdays 09:00–17:30 local with
+/// lunch pauses, short weekend mornings, idle periods, brief glances at chat,
+/// and one weekday without any evidence. Deterministic, so screenshots of the UI
+/// are comparable.
 fn demo(address: &str) -> anyhow::Result<()> {
-    use chrono::{TimeZone, Utc};
+    use chrono::{Datelike, TimeZone, Utc};
     const WINDOWS: &[(&str, &str)] = &[
         ("code", "queries.rs - timeline - Visual Studio Code"),
         ("code", "● overview.rs - timeline - Visual Studio Code"),
@@ -271,7 +273,7 @@ fn demo(address: &str) -> anyhow::Result<()> {
             .unwrap()
             .timestamp_millis()
     };
-    let first = today - chrono::Days::new(6);
+    let first = today - chrono::Days::new(20);
     let base = local(first, 0, 0);
     let mut seed: u64 = 0x5eed;
     let mut random = move |limit: u64| {
@@ -280,13 +282,23 @@ fn demo(address: &str) -> anyhow::Result<()> {
             .wrapping_add(1442695040888963407);
         (seed >> 33) % limit
     };
-    for offset in 0..7 {
+    for offset in 0..21 {
         let date = first + chrono::Days::new(offset);
-        let (start, end) = (local(date, 9, 0), local(date, 17, 30).min(now));
-        if start >= end {
+        let weekend = date.weekday().number_from_monday() > 5;
+        let (start, end) = if weekend {
+            (local(date, 10, 0), local(date, 12, 30).min(now))
+        } else {
+            (local(date, 9, 0), local(date, 17, 30).min(now))
+        };
+        // A weekday ten days ago was never recorded.
+        if start >= end || offset == 10 {
             continue;
         }
-        let (lunch, back) = (local(date, 12, 0), local(date, 12, 45));
+        let (lunch, back) = if weekend {
+            (end, end)
+        } else {
+            (local(date, 12, 0), local(date, 12, 45))
+        };
         let mut recorder = Recorder::open(dir.path(), stamp(start, base))?;
         recorder.apply(
             Input::Connected {

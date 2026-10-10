@@ -1,16 +1,13 @@
-<script lang="ts" module>
-  /** A change against a comparison period. Direction is shown with an arrow in
-   *  text colors: no change is better or worse, it is only observed. */
-  export type Delta = { text: string; direction: -1 | 0 | 1; label: string };
-</script>
 <script lang="ts">
   import type { Snippet } from "svelte";
+  import type { Delta } from "./trends";
   let { id, label, children, detail, delta, action }: {
     id?: string; label: string; children: Snippet; detail?: Snippet; delta?: Delta | string; action?: Snippet;
   } = $props();
 </script>
 
-<!-- One figure of a `dl.stat-tiles` row: label, value, optional change, detail and action. -->
+<!-- One figure of a `dl.stat-tiles` row: label, value, optional change, detail and action.
+     A change shows its direction with an arrow in text colors: it is observed, not judged. -->
 <div class="stat-tile" {id}>
   <dt>{label}</dt>
   <dd class="stat-value">{@render children()}</dd>

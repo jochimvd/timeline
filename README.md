@@ -428,7 +428,33 @@ keyboard focus to the timeline) and the share of active focus in long stretches,
 then a stretch-length bar and an hourly switch table. A timeline track shades each
 hour by its application or category switches (following "Color by") on a fixed
 five-step scale, and the hover preview reports that hour's switches. Like the
-breakdown, metrics follow the loaded range. The page follows the system
+breakdown, metrics follow the loaded range.
+
+Day, Week and Month switch views; the URL names the view and period
+(`?date=2026-10-07`, `?view=week&date=2026-10-05`, `?view=month&date=2026-10-01`),
+so it can be linked and survives reload, and Back returns from a day opened from a
+week. Weeks are seven activity days starting on Monday; months are calendar months
+of activity days. Each period view shows stat tiles for recorded focus, switches
+per active hour, the longest stretch ("Show in day view") and time in long
+stretches, each compared with the *comparison period*: the same number of activity
+days immediately before (the previous week, or for a month as many days as it
+has). While a period is in progress, the comparison stops at the same activity day
+and time of day, so weekdays and working hours line up. A day without observed
+evidence (paused, locked, recorder stopped or not yet running) is missing
+evidence, not a day without activity: its column is hatched, the evidence line
+lists such days in both periods, and a comparison period without any evidence
+shows no changes. Below are columns of active focus per day stacked by category
+(following "Color by"; applications fold beyond the top seven) with idle focus on
+top, each category's or application's active focus against the comparison period,
+small multiples of switches per active hour, longest stretch and long-stretch share
+by day, and an hour-of-day heatmap of active focus or switches, hatched where an
+hour has no evidence. Day columns, trend charts and heatmap cells show details on
+hover and keyboard focus; clicking one, or Enter, opens that day (a heatmap cell
+marks its hour). Arrow keys move between days or hours, Shift+arrows change the
+period, and Home returns to the current one. Tables under each chart carry every
+value. An in-progress period reloads every minute while visible.
+
+The page follows the system
 light or dark preference; colors come from theme tokens in `web/style.css`. Date changes
 preserve zoom and monitor layout. Superseded requests are aborted and their
 results discarded, including images still fetching or decoding. Server-side
@@ -527,8 +553,12 @@ npm run test:web
 cargo test --locked
 ```
 
-`web/App.svelte` is the page shell: header, recording status (`web/recording.ts`)
-and the session bootstrap (`web/session.ts`). The day view (`DayView.svelte`)
+`web/App.svelte` is the page shell: header, view switch and URL routing
+(`web/routes.ts`), recording status (`web/recording.ts`) and the session bootstrap
+(`web/session.ts`). Week and month views (`PeriodView.svelte`, with
+`DailyFocusChart`, `SubjectComparison`, `TrendChart` and `HourHeatmap`) render
+state from `web/period.ts`, which loads a period and its comparison, and
+`web/trends.ts`, which derives summaries, stacks, changes and heatmap cells. The day view (`DayView.svelte`)
 combines `Timeline.svelte`, `EvidenceViewer.svelte` and `Breakdown.svelte` (with
 `FocusPatterns.svelte`); stat tiles share `StatTile.svelte` and the remembered
 "Color by" choice lives in `web/preferences.ts`. `web/metrics.ts` holds the
@@ -600,7 +630,7 @@ The script prints aggregate resource measurements without credentials, activity
 titles or screenshot contents. See the
 [viewer performance measurements](docs/acceptance/2026-09-22-viewer.md).
 
-To look at the UI with a week of varied synthetic focus and demo categories, run
+To look at the UI with three weeks of varied synthetic focus and demo categories, run
 `cargo run --example web_fixture -- --demo 127.0.0.1:47850` and open the printed
 URL. It uses temporary history and settings, never the desktop or retained history.
 

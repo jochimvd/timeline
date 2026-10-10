@@ -53,7 +53,7 @@ export function createTimelineApp() {
   let rangeAbort = new AbortController(), selectionAbort = new AbortController();
   const lifetime = new AbortController();
   /** Whether the day view is shown; hidden views do not poll for live updates. */
-  let active = true;
+  let active = true, attached = false;
   let navigationAbort = new AbortController();
   let refreshTimer: ReturnType<typeof setInterval> | undefined;
   let hoverTimer: ReturnType<typeof setTimeout> | undefined;
@@ -438,12 +438,18 @@ export function createTimelineApp() {
     } catch (error) { if (generation === selectionGeneration) failure(error); }
     finally { if (generation === selectionGeneration) patch({ evidenceLoading: false }); }
   }
-  /** Opens the day view on `date`, or on the newest capture's activity day. */
-  async function start(session: Session, date?: string) {
+  /** Takes the session's timezone and starts live updates, once. */
+  function attach(session: Session) {
+    if (attached) return;
+    attached = true;
     patch({ timezone: session.timezone, settingsPath: session.settingsPath });
     refreshTimer = setInterval(() => void refresh(), 5000);
     document.addEventListener("visibilitychange", becameVisible);
     window.addEventListener("focus", becameVisible);
+  }
+  /** Opens the day view on `date`, or on the newest capture's activity day. */
+  async function start(session: Session, date?: string) {
+    attach(session);
     try {
       if (date) { await loadDay(date); return; }
       // Find the newest available capture across activity days, including when
@@ -477,6 +483,6 @@ export function createTimelineApp() {
     images.clear();
     hoverImages.clear();
   }
-  return { state: readonly(store), start, dispose, loadDay, select, hover, leave, zoom, pan, panTo, setWidth, shiftDate, jumpNow, reveal, fitActivity, stepScreenshot, stepZoom, navigateTo, layout, setActive, activityDate };
+  return { state: readonly(store), start, dispose, loadDay, select, hover, leave, zoom, pan, panTo, setWidth, shiftDate, jumpNow, reveal, fitActivity, stepScreenshot, stepZoom, navigateTo, layout, attach, setActive };
 }
 export type TimelineApp = ReturnType<typeof createTimelineApp>;
