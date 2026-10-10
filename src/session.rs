@@ -1,11 +1,7 @@
 //! Compositor lock and input-idle notifications. Recording stays closed until
 //! the initial protocol synchronization has established the lock state.
-use crate::recording::Input;
-use anyhow::{Context, Result, bail, ensure};
-use std::{
-    os::fd::{AsFd, AsRawFd},
-    time::{Duration, Instant},
-};
+use crate::{recording::Input, wayland};
+use anyhow::{Context, Result, ensure};
 use wayland_client::{
     Connection, Dispatch, EventQueue, QueueHandle,
     protocol::{wl_callback, wl_registry, wl_seat},
@@ -25,6 +21,9 @@ mod lock_protocol {
 use lock_protocol::{
     hyprland_lock_notification_v1 as lock_notification, hyprland_lock_notifier_v1 as lock_manager,
 };
+
+const IDLE_TIMEOUT_MS: u32 = 300_000;
+const EVENT_LIMIT: usize = 500;
 
 #[derive(Default)]
 struct State {
@@ -47,9 +46,7 @@ pub struct Session {
 
 impl Session {
     pub fn connect() -> Result<Self> {
-        let connection = Connection::connect_to_env()?;
-        let queue = connection.new_event_queue();
-        connection.display().get_registry(&queue.handle(), ());
+        let (connection, queue) = wayland::connect()?;
         let mut session = Self {
             connection,
             queue,
@@ -73,7 +70,7 @@ impl Session {
             .idle_manager
             .as_ref()
             .context("input idle notifications unavailable")?
-            .get_input_idle_notification(300_000, seat, &handle, ());
+            .get_input_idle_notification(IDLE_TIMEOUT_MS, seat, &handle, ());
         session.synchronize()?;
         session.state.events.clear();
         Ok(session)
@@ -88,54 +85,28 @@ impl Session {
 
     /// A bounded synchronization barrier is used around fresh focus snapshots.
     pub fn synchronize(&mut self) -> Result<()> {
-        self.state.synced = false;
-        self.connection.display().sync(&self.queue.handle(), ());
-        let deadline = Instant::now() + Duration::from_millis(500);
-        while !self.state.synced {
-            ensure!(
-                Instant::now() < deadline,
-                "Wayland synchronization timed out"
-            );
-            self.pump(25)?;
-        }
-        Ok(())
+        wayland::synchronize(
+            &self.connection,
+            &mut self.queue,
+            &mut self.state,
+            "Wayland",
+        )
     }
 
     pub fn events(&mut self) -> Result<Vec<Input>> {
-        self.pump(0)?;
+        wayland::pump(&self.connection, &mut self.queue, &mut self.state, 0)?;
         Ok(std::mem::take(&mut self.state.events))
     }
+}
 
-    fn pump(&mut self, timeout_ms: i32) -> Result<()> {
-        self.queue.dispatch_pending(&mut self.state)?;
-        self.connection.flush()?;
-        if let Some(guard) = self.queue.prepare_read() {
-            let mut fd = libc::pollfd {
-                fd: self.connection.as_fd().as_raw_fd(),
-                events: libc::POLLIN,
-                revents: 0,
-            };
-            let count = unsafe { libc::poll(&mut fd, 1, timeout_ms) };
-            if count < 0 {
-                let error = std::io::Error::last_os_error();
-                if error.kind() != std::io::ErrorKind::Interrupted {
-                    return Err(error.into());
-                }
-            } else if count > 0 {
-                match guard.read() {
-                    Ok(_) => (),
-                    Err(wayland_client::backend::WaylandError::Io(error))
-                        if error.kind() == std::io::ErrorKind::WouldBlock => {}
-                    Err(error) => return Err(error.into()),
-                }
-            }
-        }
-        self.queue.dispatch_pending(&mut self.state)?;
-        if self.state.removed {
-            bail!("required Wayland global removed");
-        }
+impl wayland::Protocol for State {
+    fn synced(&mut self) -> &mut bool {
+        &mut self.synced
+    }
+    fn check(&self) -> Result<()> {
+        ensure!(!self.removed, "required Wayland global removed");
         ensure!(
-            self.state.events.len() <= 500,
+            self.events.len() <= EVENT_LIMIT,
             "Wayland notification backlog exceeded limit"
         );
         Ok(())
