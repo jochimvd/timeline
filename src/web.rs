@@ -125,13 +125,7 @@ impl Web {
             QueryError::InvalidRequest
         );
         let generation: u64 = generation.parse().map_err(|_| invalid())?;
-        let session = header(headers, "cookie")
-            .and_then(|cookie| {
-                cookie
-                    .split(';')
-                    .find_map(|part| part.trim().strip_prefix("timeline_session="))
-            })
-            .ok_or_else(invalid)?;
+        let session = session_cookie(headers).ok_or_else(invalid)?;
         let flag = Arc::new(AtomicBool::new(false));
         let mut selections = self.selections.lock().unwrap();
         // Only active work retains flags, so the map is bounded by admission.
@@ -235,6 +229,11 @@ fn header<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
     }
     headers.get(name)?.to_str().ok()
 }
+fn session_cookie(headers: &HeaderMap) -> Option<&str> {
+    header(headers, "cookie")?
+        .split(';')
+        .find_map(|part| part.trim().strip_prefix("timeline_session="))
+}
 fn failure(status: StatusCode, code: &str) -> Response {
     (status, Json(json!({"error":code}))).into_response()
 }
@@ -274,11 +273,7 @@ async fn guard(State(state): State<Arc<Web>>, request: Request, next: Next) -> R
         }
     } else {
         if !public {
-            let session = header(headers, "cookie").and_then(|cookie| {
-                cookie
-                    .split(';')
-                    .find_map(|part| part.trim().strip_prefix("timeline_session="))
-            });
+            let session = session_cookie(headers);
             let mut credentials = state.credentials.lock().unwrap();
             credentials
                 .sessions
