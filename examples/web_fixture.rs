@@ -228,8 +228,8 @@ name = "Browsing"
 application = "firefox"
 "#;
 
-/// Seven activity days ending today, 09:00–17:30 local, with lunch pauses and
-/// idle stretches. Deterministic, so screenshots of the UI are comparable.
+/// Seven activity days ending today, 09:00–17:30 local, with lunch pauses,
+/// idle periods and brief glances at chat. Deterministic, so screenshots of the UI are comparable.
 fn demo(address: &str) -> anyhow::Result<()> {
     use chrono::{TimeZone, Utc};
     const WINDOWS: &[(&str, &str)] = &[
@@ -306,6 +306,24 @@ fn demo(address: &str) -> anyhow::Result<()> {
                 }
                 at = back;
                 recorder.apply(Input::Resume, stamp(at, base))?;
+            }
+            // Occasional glances at chat, mostly short enough to be bridged
+            // within a focus stretch.
+            if at > start && random(4) == 0 {
+                recorder.apply(
+                    Input::Focus(Some(Window {
+                        address: "Slack-glance".into(),
+                        application: "Slack".into(),
+                        title: "Direct message - Slack".into(),
+                    })),
+                    stamp(at, base),
+                )?;
+                let until = (at + 1000 * (8 + random(70)) as i64).min(end);
+                while at + 4000 < until {
+                    at += 4000;
+                    recorder.apply(Input::Tick, stamp(at, base))?;
+                }
+                at = until;
             }
             let (application, title) = WINDOWS[random(WINDOWS.len() as u64) as usize];
             recorder.apply(

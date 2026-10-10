@@ -1,10 +1,12 @@
 <script lang="ts">
   import { query } from "./api";
-  import { applicationSwatch, captureTime, categorySwatch, duration, swatchStyle, UNCATEGORIZED, type Swatch } from "./format";
-  import type { CategoryList, CategoryRow, Coverage, Overview, Range } from "./types";
-  let { rows, categories, totals, range, timezone, settingsPath, loading }: {
-    rows: Coverage[]; categories: CategoryRow[]; totals?: Overview["totals"]; range?: Range;
-    timezone: string; settingsPath: string | null; loading: boolean;
+  import FocusPatterns from "./FocusPatterns.svelte";
+  import { applicationSwatch, captureTime, categorySwatch, clockRange, duration, swatchStyle, UNCATEGORIZED, type Swatch } from "./format";
+  import { plural } from "./metrics";
+  import type { CategoryList, CategoryRow, Coverage, FocusMetrics, FocusSubject, Overview, Range } from "./types";
+  let { rows, categories, totals, metrics, range, timezone, settingsPath, loading, onreveal }: {
+    rows: Coverage[]; categories: CategoryRow[]; totals?: Overview["totals"]; metrics?: FocusMetrics; range?: Range;
+    timezone: string; settingsPath: string | null; loading: boolean; onreveal: (range: Range) => void;
   } = $props();
   /** One ranked row: a name, optional context line, its focus share and mark color. */
   type Entry = { key: string; name: string; detail?: string; elapsed_ms: number; percent: number; swatch: Swatch };
@@ -29,6 +31,10 @@
     .sort((a, b) => Number(a.key === "") - Number(b.key === "")));
   const categorizedPercent = $derived(categories.filter(row => row.category !== null)
     .reduce((sum, row) => sum + row.percent_of_focus, 0));
+  const subjectSwatch = (subject: FocusSubject) => subject.kind === "category"
+    ? categorySwatch(categories.find(row => row.category === subject.name)) : applicationSwatch(subject.name);
+  const longest = $derived(metrics?.longest_stretch ?? null);
+  const longShare = $derived(metrics && metrics.active_ms > 0 ? 100 * metrics.stretches.long.elapsed_ms / metrics.active_ms : 0);
 
   // Definitions load lazily: when the rules are opened, or to explain why none apply.
   let rulesOpen = $state(false);
@@ -76,19 +82,46 @@
 
 <section id="breakdown" class="panel focus-breakdown" aria-labelledby="breakdown-heading" aria-busy={loading}>
   <div class="breakdown-heading">
-    <h2 id="breakdown-heading">Focus breakdown</h2>
+    <h2 id="breakdown-heading">Focus summary</h2>
     <p class="muted">Loaded range{range ? " · " + captureTime(range.start_ms, timezone) + " – " + captureTime(range.end_ms, timezone) : ""}</p>
   </div>
   {#if totals && totals.focus_ms > 0}
-    <dl id="totals" class="focus-totals">
-      <div><dt>Recorded focus</dt><dd>{duration(totals.focus_ms)}</dd></div>
-      <div><dt>Idle within focus</dt><dd>{duration(totals.idle_ms)}</dd></div>
-      {#if configured}<div><dt>Categorized</dt><dd>{categorizedPercent.toFixed(0)}%</dd></div>{/if}
-      <div><dt>Applications</dt><dd>{applications.length}</dd></div>
+    <dl id="totals" class="stat-tiles">
+      <div class="stat-tile">
+        <dt>Recorded focus</dt>
+        <dd class="stat-value">{duration(totals.focus_ms)}</dd>
+        <dd class="stat-detail">{duration(totals.idle_ms)} idle{#if metrics}{` · ${duration(metrics.active_ms)} active`}{/if}</dd>
+      </div>
+      {#if metrics}
+        <div class="stat-tile" id="switch-rate">
+          <dt>Context switches</dt>
+          <dd class="stat-value">{metrics.application_switches_per_hour ?? "—"}{" "}<small>per active hour</small></dd>
+          <dd class="stat-detail">{plural(metrics.application_switches, "application switch", "application switches")}{#if metrics.category_switches !== null}{` · ${metrics.category_switches_per_hour ?? "—"}/h between categories`}{/if}</dd>
+        </div>
+        <div class="stat-tile" id="longest-stretch">
+          <dt>Longest focus stretch</dt>
+          {#if longest}
+            <dd class="stat-value">{duration(longest.elapsed_ms)}</dd>
+            <dd class="stat-detail">
+              <span class="category-tag"><span class="swatch" style={swatchStyle(subjectSwatch(longest.subject))}></span>{longest.subject.name}</span>
+              {` · ${clockRange(longest.range, timezone)}`}{#if longest.interruptions}{` · ${plural(longest.interruptions, "brief interruption")}`}{/if}
+            </dd>
+            <dd><button class="link-button" onclick={() => onreveal(longest.range)}>Show on timeline</button></dd>
+          {:else}<dd class="stat-value">—</dd><dd class="stat-detail">No active focus</dd>{/if}
+        </div>
+        <div class="stat-tile" id="long-share">
+          <dt>In long stretches</dt>
+          <dd class="stat-value">{longShare.toFixed(0)}%</dd>
+          <dd class="stat-detail">of active focus, in {plural(metrics.stretches.long.count, "stretch", "stretches")} of 25 min or more</dd>
+        </div>
+      {/if}
     </dl>
+    {#if metrics && metrics.active_ms > 0}
+      <FocusPatterns {metrics} {timezone} categorized={metrics.category_switches !== null} />
+    {/if}
     <div class="breakdown-columns">
       <section aria-labelledby="categories-heading">
-        <h3 id="categories-heading">Categories <span class="muted">· share of recorded focus</span></h3>
+        <h3 id="categories-heading">Categories <span class="muted">· {configured ? `${categorizedPercent.toFixed(0)}% categorized` : "share of recorded focus"}</span></h3>
         {#if configured}
           <div class="composition" role="img" aria-label={"Focus by category: " + composition.map(entry => `${entry.name} ${entry.percent.toFixed(0)}%`).join(", ")}>
             {#each composition as entry (entry.key)}
@@ -107,7 +140,7 @@
         {/if}
       </section>
       <section aria-labelledby="applications-heading">
-        <h3 id="applications-heading">Applications <span class="muted">· most time first</span></h3>
+        <h3 id="applications-heading">Applications <span class="muted">· {applications.length} by time</span></h3>
         {@render ranking(applications, "applications")}
       </section>
     </div>
@@ -136,7 +169,11 @@
         <p class="muted">Defined in {#if settingsPath}<code>{settingsPath}</code>{:else}the settings file{/if}; edits apply to all retained history.</p>
       </details>
     {/if}
-    <p class="muted breakdown-note">Time with a window in focus, including idle time. Percentages are shares of recorded focus; recording gaps are excluded. Categories follow your rules over application and window title. This is observed activity, not time assigned to tasks.</p>
+    <p class="muted breakdown-note">Recorded focus is time with a window in focus, including idle time; active focus excludes idle.
+      Category and application percentages are shares of recorded focus; recording gaps are excluded.
+      A context switch is a change of application or category while you were active — never across idle time, gaps or pauses.
+      A focus stretch is continuous active focus on one category (or uncategorized application); glances away shorter than a minute
+      don't end it while they stay under a tenth of it. This is observed activity: not time assigned to tasks, and not a measure of productivity.</p>
   {:else if totals}
     <p class="breakdown-empty">No recorded focus in this range.</p>
     <p class="muted">Choose another day or widen the timeline window to explore more activity.</p>

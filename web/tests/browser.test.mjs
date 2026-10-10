@@ -181,7 +181,16 @@ test("bundled browser with real history, calendar, lanes, breakdown, monitors an
     // Categories come from the fixture's settings file: all recorded focus is Planning.
     assert.match(await page.locator("#categories li").first().innerText(), /Planning[\s\S]*100\.0%/);
     assert.match(await page.locator("#categories").innerText(), /Research[\s\S]*Communication/);
-    assert.match(await page.locator("#totals").innerText(), /Categorized\s+100%/);
+    assert.match(await page.locator("#categories-heading").innerText(), /100% categorized/);
+    // Focus metrics: one uninterrupted hour on Planning, with no switches.
+    assert.match(await page.locator("#switch-rate").innerText(), /0 per active hour[\s\S]*0 application switches · 0\/h between categories/);
+    assert.match(await page.locator("#longest-stretch").innerText(), /1h\s+Planning · 04:00–05:00/);
+    assert.match(await page.locator("#long-share").innerText(), /100%[\s\S]*1 stretch of 25 min or more/);
+    assert.match(await page.locator("#stretch-distribution").innerText(), /25 min or more\s+1 stretch\s+1h\s+100%/);
+    assert.equal(await page.locator("#switch-strip").count(), 1);
+    assert.equal(await page.locator("#switch-strip .switch-cell").count(), 0, "hours without switches stay empty");
+    await page.locator("#breakdown summary", { hasText: "Switches by hour" }).click();
+    assert.match(await page.locator("#hourly-switches tbody").innerText(), /04:00–05:00\s+1h\s+0\s+0/);
     assert.match(await page.locator("#titles").innerText(), /Editor · Planning/);
     await page.locator("#color-by label", { hasText: "Category" }).click();
     assert.match(await page.locator("#lanes").innerText(), /Category lanes/);
@@ -195,6 +204,11 @@ test("bundled browser with real history, calendar, lanes, breakdown, monitors an
     await page.locator(".breakdown-details", { hasText: "Category rules" }).locator("summary").click();
     await page.waitForFunction(() => document.querySelectorAll("#category-rules > li").length === 3);
     assert.match(await page.locator("#category-rules").innerText(), /Research[\s\S]*Browser/);
+    await page.locator("#longest-stretch button").click();
+    await page.waitForFunction(() => document.querySelector("#stretch-highlight")
+      && document.querySelector("#images").getAttribute("aria-busy") === "false");
+    assert.match(await page.locator("#selected").innerText(), /04:00:00/, "revealing a stretch selects its start");
+    assert.equal(await page.evaluate(() => document.activeElement.id), "timeline");
     await page.locator("#layout").selectOption("stack");
     await page.waitForFunction(
       () => document.querySelectorAll("#images canvas").length === 2,
@@ -519,6 +533,8 @@ test("bundled browser with real history, calendar, lanes, breakdown, monitors an
       .some(n => n.dataset.description?.includes("Browser")), null, { timeout: 7000 });
     assert.match(await page.locator("#applications").innerText(), /Browser/);
     assert.doesNotMatch(await page.locator("#categories").innerText(), /Research\s+—/, "live updates refresh category totals");
+    assert.match(await page.locator("#stretch-distribution").innerText(), /Under 10 min\s+1 stretch/,
+      "live updates refresh focus metrics; the pause keeps the stretches apart");
     assert.match(await timeline.innerText(), /Screenshots · Display C/);
     assert.equal(await page.locator("#images canvas").count(), 0, "live refresh must not replace the selected preview");
     await timeline.dispatchEvent("click", { clientX: Math.ceil(liveBox.x + liveBox.width * 3650000 / 86400000), buttons: 1 });

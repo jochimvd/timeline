@@ -3,7 +3,8 @@
   import SuspenseBoundary from "./SuspenseBoundary.svelte";
   import { onMount } from "svelte";
   import { on } from "svelte/events";
-  import { applicationSwatch, categorySwatch, coverageBands, swatchStyle, time, imageTransform, UNCATEGORIZED, type Swatch } from "./format";
+  import { applicationSwatch, categorySwatch, clockRange, coverageBands, duration, swatchStyle, time, imageTransform, UNCATEGORIZED, type Swatch } from "./format";
+  import { hourSwitches, plural, SWITCH_LEVELS, switchLevel, switchLevelLabel } from "./metrics";
   import { zoomLevels, type TimelineApp, type View } from "./model";
   import type { Block, Range } from "./types";
   let { view, app }: { view: View; app: TimelineApp } = $props();
@@ -28,9 +29,16 @@
     const present = new Set(blocks.map(block => block.category));
     return view.categories.filter(row => present.has(row.category));
   });
+  // Hourly switches of the loaded range, following the color mode.
+  const hours = $derived(view.metrics?.hours ?? []);
+  const switchNoun = $derived(mode === "category" ? "category switch" : "application switch");
+  const describeHour = (hour: (typeof hours)[number]) => `${clockRange(hour.range, timezone)} · `
+    + `${plural(hourSwitches(hour, mode), switchNoun, switchNoun + "es")} in ${duration(hour.active_ms)} active`;
   let timelineWidth = $state(0);
   $effect(() => app.setWidth(timelineWidth));
   let hoverTime = $state<number | null>(null);
+  const hoverHour = $derived(hoverTime === null ? undefined
+    : hours.find(hour => hour.range.start_ms <= hoverTime! && hoverTime! < hour.range.end_ms));
   let pointerX = $state(0), pointerY = $state(0);
   let viewportWidth = $state(0), viewportHeight = $state(0);
   let popupWidth = $state(320), popupHeight = $state(200);
@@ -249,6 +257,21 @@
         {#if row.idle || row.focus?.idle}<div class="block idle" style={position(row.range!)} data-description="Idle"></div>{/if}
       {/each}
     </div>
+    {#if hours.length}
+      <div class="track-label switch-label">
+        <span>{mode === "category" ? "Category" : "Application"} switches per hour</span>
+        <span class="scale-legend" aria-hidden="true">
+          {#each SWITCH_LEVELS as _, index}<span><span class="swatch" style:background={`var(--ramp-${index + 1})`}></span>{switchLevelLabel(index + 1)}</span>{/each}
+        </span>
+      </div>
+      <div class="track switch-track" id="switch-strip">
+        {#each hours as hour (hour.range.start_ms)}
+          {@const level = switchLevel(hourSwitches(hour, mode))}
+          {#if level}<div class="block switch-cell" style={position(hour.range) + `;background:var(--ramp-${level})`}
+            data-description={describeHour(hour)}></div>{/if}
+        {/each}
+      </div>
+    {/if}
     {#each imageTracks as track (track.monitor)}
       <div class="track-label">Screenshots · {track.monitor}</div>
       <div class="track">
@@ -263,6 +286,9 @@
       {#each lanes as lane (lane.key)}
         {@render blockTrack(lane.label, lane.blocks)}
       {/each}
+    {/if}
+    {#if view.highlight && view.highlight.end_ms > visible.start_ms && view.highlight.start_ms < visible.end_ms}
+      <div id="stretch-highlight" class="stretch-highlight" style={position(view.highlight)} aria-hidden="true"></div>
     {/if}
     <div id="cursor" class="cursor" hidden={!inView(view.selected)} style:left={percent(view.selected) + "%"}></div>
     <div id="hover-cursor" class="hover-cursor" hidden={hoverTime === null || !inView(hoverTime)} aria-hidden="true" style:left={percent(hoverTime ?? 0) + "%"}></div>
@@ -295,6 +321,7 @@
       <p class="tooltip-title">{hoverFocus?.reason || (hoverFocus?.kind === "no_focus" ? "No focused window" : "No focus evidence at this time.")}</p>
     {/if}
     </div>
+    {#if hoverHour}<p class="tooltip-switches">{describeHour(hoverHour)}</p>{/if}
     <div class="tooltip-preview" aria-busy={!previewReady}
       style:height={previewHeight + "px"}>
       <SuspenseBoundary ready={previewFrames !== null}>

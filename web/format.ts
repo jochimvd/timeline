@@ -7,25 +7,23 @@ export function duration(ms: number) {
   const minutes = Math.round(ms / 60_000);
   return minutes < 60 ? `${minutes} min` : `${Math.floor(minutes / 60)}h${minutes % 60 ? ` ${minutes % 60}m` : ""}`;
 }
-// Intl formatter construction is expensive; timeline labels share one per timezone.
-const timeFormatters = new Map<string, Intl.DateTimeFormat>();
-const captureFormatters = new Map<string, Intl.DateTimeFormat>();
-export function time(ms: number, timezone: string) {
-  let formatter = timeFormatters.get(timezone);
-  if (!formatter) {
-    formatter = new Intl.DateTimeFormat("en-GB", { timeZone: timezone, hour: "2-digit", minute: "2-digit", second: "2-digit" });
-    timeFormatters.set(timezone, formatter);
-  }
-  return formatter.format(ms);
+// Intl formatter construction is expensive; labels share one per timezone and style.
+const formatters = new Map<string, Intl.DateTimeFormat>();
+function formatter(timezone: string, style: string, options: Intl.DateTimeFormatOptions) {
+  const key = style + " " + timezone;
+  let cached = formatters.get(key);
+  if (!cached) formatters.set(key, cached = new Intl.DateTimeFormat("en-GB", { timeZone: timezone, ...options }));
+  return cached;
 }
-export function captureTime(ms: number, timezone: string) {
-  let formatter = captureFormatters.get(timezone);
-  if (!formatter) {
-    formatter = new Intl.DateTimeFormat("en-GB", { timeZone: timezone, dateStyle: "medium", timeStyle: "medium" });
-    captureFormatters.set(timezone, formatter);
-  }
-  return formatter.format(ms);
-}
+export const time = (ms: number, timezone: string) =>
+  formatter(timezone, "time", { hour: "2-digit", minute: "2-digit", second: "2-digit" }).format(ms);
+/** Hours and minutes, for ranges such as stretches and hourly buckets. */
+export const clock = (ms: number, timezone: string) =>
+  formatter(timezone, "clock", { hour: "2-digit", minute: "2-digit" }).format(ms);
+export const clockRange = (range: { start_ms: number; end_ms: number }, timezone: string) =>
+  `${clock(range.start_ms, timezone)}–${clock(range.end_ms, timezone)}`;
+export const captureTime = (ms: number, timezone: string) =>
+  formatter(timezone, "capture", { dateStyle: "medium", timeStyle: "medium" }).format(ms);
 /** Stable application hue; light enough for dark label ink in both themes. */
 export const color = (name: string) => `hsl(${Array.from(name).reduce((n, c) => (n * 31 + c.charCodeAt(0)) % 360, 0)} 44% 61%)`;
 

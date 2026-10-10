@@ -404,7 +404,14 @@ breakdowns, monitor layouts, and image enlargement. Breakdown totals follow the
 visible range. With categories configured, "Color by" switches timeline fills,
 labels and lanes between applications and categories (remembered per browser),
 the breakdown adds a category composition bar and ranking, and a collapsed
-"Category rules" panel lists the active definitions. The page follows the system
+"Category rules" panel lists the active definitions. The focus summary leads with
+stat tiles for recorded and active focus, context switches per active hour, the
+longest focus stretch ("Show on timeline" marks it, selects its start and moves
+keyboard focus to the timeline) and the share of active focus in long stretches,
+then a stretch-length bar and an hourly switch table. A timeline track shades each
+hour by its application or category switches (following "Color by") on a fixed
+five-step scale, and the hover preview reports that hour's switches. Like the
+breakdown, metrics follow the loaded range. The page follows the system
 light or dark preference; colors come from theme tokens in `web/style.css`. Date changes
 preserve zoom and monitor layout. Superseded requests are aborted and their
 results discarded, including images still fetching or decoding. Server-side
@@ -502,7 +509,8 @@ cargo test --locked
 ```
 
 The Svelte views live in `web/App.svelte`, `Timeline.svelte`,
-`Breakdown.svelte` and `EvidenceViewer.svelte`. `web/model.ts` owns application
+`Breakdown.svelte` (with `FocusPatterns.svelte`) and `EvidenceViewer.svelte`;
+`web/metrics.ts` holds the focus-metric scales and labels. `web/model.ts` owns application
 state, request cancellation and hover scheduling; `web/images.ts` owns tile
 decoding, reuse and bitmap cleanup; `ScreenshotCanvas.svelte` owns canvas surfaces. Views render state without manually
 rebuilding DOM trees. Range updates preserve the displayed evidence while
