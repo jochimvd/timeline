@@ -661,7 +661,7 @@ fn tool_definitions() -> Value {
         ("focus_metrics", metrics.as_str(), vec![]),
         ("commits", commits.as_str(), vec![]),
         ("repositories", "The configured git paths and extra author emails, and the repositories found under them: name (relative to its configured path), path, and repositories or paths that could not be read. Repository names help relate commits and windows to projects.", vec![]),
-        ("categories", "The user's category definitions: ordered rules matching an exact application and/or a regex over the cleaned window title; the first matching rule in configuration order applies, at any level. A category may have a parent, making it a subcategory; its time rolls up to every ancestor. Categories classify observed focus; they are hints, not task attribution.", vec![]),
+        ("categories", "The user's category definitions: ordered rules matching an exact application and/or a regex over the cleaned window title; the first matching rule in file order applies, at any level, with fallback rules tried last. A category may have a parent, making it a subcategory; its time rolls up to every ancestor. Categories classify observed focus; they are hints, not task attribution.", vec![]),
         ("blocks", "Activity blocks in a half-open range up to 48 hours, each with its category (null when uncategorized). Stable block and observation references; grouping is not task attribution.", vec!["range"]),
         ("observations", "Original window observations in a range up to 48 hours. Page before inferring tasks.", vec!["range"]),
         ("observation", "Retrieve one original observation by its stable ID; expired evidence is unavailable.", vec!["id"]),

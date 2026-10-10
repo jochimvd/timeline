@@ -84,7 +84,8 @@ export type OverviewUpdates = {
  *  order. `elapsed_ms` includes subcategories; `own_ms` is the category's own matches. */
 export type CategoryRow = Coverage & { kind: "category"; category: string | null; parent: string | null; depth: number;
   elapsed_ms: number; own_ms: number; percent_of_focus: number };
-export type CategoryRule = { application?: string; title?: string };
+/** Fallback rules are tried after every other rule. */
+export type CategoryRule = { application?: string; title?: string; fallback?: boolean };
 export type CategoryList = {
   /** In tree order: each category followed by its subcategories. */
   categories: { name: string; parent: string | null; depth: number; color: string | null; palette: number | null; rules: CategoryRule[] }[];

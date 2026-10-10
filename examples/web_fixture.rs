@@ -40,12 +40,9 @@ application = "Browser"
 name = "Communication"
 [[categories.rules]]
 application = "Chat"
-
-[[categories]]
-name = "Mail"
-parent = "Communication"
-[[categories.rules]]
-application = "Mail"
+  [[categories.children]]
+  name = "Mail"
+  rules = [{ application = "Mail" }]
 "##;
 
 /// Git for this process and its fixture repositories: a temporary global
@@ -276,50 +273,34 @@ pattern = '^[\x{2800}-\x{28FF}✳]\s+'
 [[categories]]
 name = "Projects"
 
-[[categories]]
-name = "Timeline"
-parent = "Projects"
-[[categories.rules]]
-application = "code"
-title = '(?i)timeline'
-[[categories.rules]]
-application = "kitty"
-title = 'timeline'
-[[categories.rules]]
-application = "firefox"
-title = 'localhost:47831|timeline'
+  [[categories.children]]
+  name = "Timeline"
+  rules = [
+    { application = "code", title = '(?i)timeline' },
+    { application = "kitty", title = 'timeline' },
+    { application = "firefox", title = 'localhost:47831|timeline' },
+  ]
 
-[[categories]]
-name = "Writing"
-parent = "Projects"
-[[categories.rules]]
-application = "obsidian"
-[[categories.rules]]
-application = "code"
-title = 'notes'
+  [[categories.children]]
+  name = "Writing"
+  rules = [{ application = "obsidian" }, { application = "code", title = 'notes' }]
 
 [[categories]]
 name = "Communication"
-[[categories.rules]]
-application = "thunderbird"
+rules = [{ application = "thunderbird" }]
 
-[[categories]]
-name = "Chat"
-parent = "Communication"
-color = "#c45ae0"
-[[categories.rules]]
-application = "Slack"
+  [[categories.children]]
+  name = "Chat"
+  color = "#c45ae0"
+  rules = [{ application = "Slack" }]
 
-[[categories]]
-name = "Meetings"
-parent = "Communication"
-[[categories.rules]]
-application = "zoom"
+  [[categories.children]]
+  name = "Meetings"
+  rules = [{ application = "zoom" }]
 
 [[categories]]
 name = "Browsing"
-[[categories.rules]]
-application = "firefox"
+rules = [{ application = "firefox", fallback = true }]
 "##;
 
 /// Three weeks of activity days ending today: weekdays 09:00–17:30 local with

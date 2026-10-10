@@ -453,22 +453,15 @@ fn subcategory_focus_rolls_up_to_every_ancestor() {
     let settings = Settings::parse(
         r##"
         [[categories]]
-        name = "Project X"
-        parent = "Acme"
-        [[categories.rules]]
-        title = 'project-x'
-
-        [[categories]]
         name = "Work"
         color = "#4f8cff"
-        [[categories.rules]]
-        title = 'Jira'
-
-        [[categories]]
-        name = "Acme"
-        parent = "Work"
-        [[categories.rules]]
-        application = "chat"
+        rules = [{ title = 'Jira' }]
+          [[categories.children]]
+          name = "Acme"
+          rules = [{ application = "chat" }]
+            [[categories.children.children]]
+            name = "Project X"
+            rules = [{ title = 'project-x' }]
         "##,
     )
     .unwrap();
