@@ -3,7 +3,7 @@
   import SuspenseBoundary from "./SuspenseBoundary.svelte";
   import { onMount } from "svelte";
   import { on } from "svelte/events";
-  import { applicationSwatch, categorySwatch, clock, clockRange, coverageBands, duration, swatchStyle, time, imageTransform, UNCATEGORIZED, type Swatch } from "./format";
+  import { applicationSwatch, categorySwatch, clock, clockRange, coverageBands, duration, noScreenshot, swatchStyle, time, imageTransform, UNCATEGORIZED, type Swatch } from "./format";
   import { hourSwitches, plural, SWITCH_LEVELS, switchLevel, switchLevelLabel } from "./metrics";
   import { zoomLevels, type TimelineApp, type View } from "./model";
   import { colorBy } from "./preferences";
@@ -431,7 +431,7 @@
               {:else}<p class="error">{frame.error}</p>{/if}
               <span>{frame.shot.screenshot.monitor} · {time(frame.shot.screenshot.unix_ms, timezone)}{frame.shot.stale ? " · stale" : ""}</span>
             </div>
-          {:else}<p>No screenshot evidence at this time.</p>{/each}
+          {:else}<p>{noScreenshot(previewReady ? view.hoverEvidence.expired : view.shotsExpired)}</p>{/each}
         {/if}
       </SuspenseBoundary>
     </div>

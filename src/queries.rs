@@ -295,6 +295,9 @@ pub struct CursorEvidence {
     /// Multiple entries disclose repeated wall times instead of choosing a segment silently.
     pub focus: Vec<Coverage>,
     pub screenshots: Vec<SelectedScreenshot>,
+    /// Screenshots from the selected time were deleted by retention, which
+    /// keeps them for a shorter period than observations.
+    pub screenshots_expired: bool,
 }
 #[derive(Debug, Serialize)]
 pub struct SelectedScreenshot {

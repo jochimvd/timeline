@@ -180,8 +180,10 @@ fn startup_and_hourly_cleanup_remove_old_metadata_without_losing_pause_state() {
         let mut recorder = Recorder::open(directory.path(), at(0)).unwrap();
         recorder.apply(Input::Pause, at(1)).unwrap();
     }
-    let thirty_one_days = 31 * 24 * 60 * 60;
-    let mut recorder = Recorder::open(directory.path(), at(thirty_one_days)).unwrap();
+    // Retention periods in the seconds `at` takes.
+    let kept = timeline::config::METADATA_RETENTION_MS / 1000;
+    let later = kept + 86_400;
+    let mut recorder = Recorder::open(directory.path(), at(later)).unwrap();
     assert!(recorder.status().manual_paused);
     assert!(
         recorder
@@ -189,18 +191,16 @@ fn startup_and_hourly_cleanup_remove_old_metadata_without_losing_pause_state() {
             .observations(0, 100)
             .unwrap()
             .iter()
-            .all(|o| o.unix_ms >= at(thirty_one_days - 30 * 86400).unix_ms)
+            .all(|o| o.unix_ms >= at(later - kept).unix_ms)
     );
-    recorder
-        .apply(Input::Tick, at(thirty_one_days * 2))
-        .unwrap();
+    recorder.apply(Input::Tick, at(later * 2)).unwrap();
     assert!(
         recorder
             .history()
             .observations(0, 100)
             .unwrap()
             .iter()
-            .all(|o| o.unix_ms >= at(thirty_one_days * 2 - 30 * 86400).unix_ms)
+            .all(|o| o.unix_ms >= at(later * 2 - kept).unix_ms)
     );
 }
 

@@ -4,7 +4,7 @@
   type Storage = { total_bytes: number; pack_bytes: number; pack_count: number; database_bytes: number;
     map_bytes: number; map_uncompressed_bytes: number; captures: number; images: number; regions: number;
     tile_reuse_percent: number | null; thumbnail_cache_bytes: number; thumbnail_cache_limit: number;
-    retention_days: number; measured_ms: number };
+    metadata_retention_days: number; screenshot_retention_days: number; measured_ms: number };
   let data = $state<Storage>();
   let busy = $state(false), error = $state("");
   let controller: AbortController | undefined;
@@ -41,7 +41,7 @@
       <div><dt>Preview cache <small>RAM only{data ? ` · ${bytes(data.thumbnail_cache_limit)} limit` : ""}</small></dt><dd>{bytes(data?.thumbnail_cache_bytes)}</dd></div>
     </dl>
     <div class="storage-caption">
-      <span>{data ? `${data.captures.toLocaleString()} captures · ${data.regions.toLocaleString()} regions · ${data.retention_days}-day retention` : "\u00a0"}</span>
+      <span>{data ? `${data.captures.toLocaleString()} captures · ${data.regions.toLocaleString()} regions · screenshots kept ${data.screenshot_retention_days} days, activity ${data.metadata_retention_days}` : "\u00a0"}</span>
       <button onclick={() => void refresh()} disabled={busy}>Refresh</button>
     </div>
     <p class="storage-error" role="status">{error || "\u00a0"}</p>

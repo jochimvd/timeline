@@ -22,6 +22,9 @@ export const clock = (ms: number, timezone: string) =>
   formatter(timezone, "clock", { hour: "2-digit", minute: "2-digit" }).format(ms);
 export const clockRange = (range: { start_ms: number; end_ms: number }, timezone: string) =>
   `${clock(range.start_ms, timezone)}–${clock(range.end_ms, timezone)}`;
+export const noScreenshot = (expired: boolean) => expired
+  ? "Screenshots from this time have expired; activity is kept longer."
+  : "No screenshot evidence at this time.";
 export const captureTime = (ms: number, timezone: string) =>
   formatter(timezone, "capture", { dateStyle: "medium", timeStyle: "medium" }).format(ms);
 /** Stable application hue; light enough for dark label ink in both themes. */

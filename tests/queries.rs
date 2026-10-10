@@ -1398,3 +1398,55 @@ fn incremental_overviews_pin_pages_and_reconstruct_the_exact_next_snapshot() {
         .reset
     );
 }
+
+#[test]
+fn screenshots_expire_before_observations_and_selection_says_so() {
+    const DAY: i64 = 24 * 60 * 60 * 1000;
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = History::open(dir.path()).unwrap();
+    put(&mut h, 0, 0, 1, StateChange::Focus, state(Some("A"), false));
+    let image = History::prepare_image(dir.path(), &common::webp(b"old")).unwrap();
+    h.commit_screenshot(&sample(1, "A"), "old pixels", &image)
+        .unwrap();
+    drop(image);
+    let image = History::prepare_image(dir.path(), &common::webp(b"new")).unwrap();
+    h.commit_screenshot(&sample(2 * DAY, "A"), "new pixels", &image)
+        .unwrap();
+    drop(image);
+    put(
+        &mut h,
+        2 * DAY + 1,
+        2 * DAY + 1,
+        1,
+        StateChange::Checkpoint,
+        state(Some("A"), false),
+    );
+    let q = Queries::open(dir.path()).unwrap();
+    assert!(
+        !q.cursor_evidence(Browser, 2, None)
+            .unwrap()
+            .screenshots_expired
+    );
+
+    // A day past screenshot retention: the first capture expires, focus stays.
+    h.expire(timeline::config::SCREENSHOT_RETENTION_MS + DAY)
+        .unwrap();
+    let old = q.cursor_evidence(Browser, 2, None).unwrap();
+    assert!(old.screenshots.is_empty());
+    assert!(old.screenshots_expired);
+    assert!(matches!(old.focus[0].focus, FocusCoverage::Focus { .. }));
+    let recent = q.cursor_evidence(Browser, 2 * DAY, None).unwrap();
+    assert_eq!(recent.screenshots.len(), 1);
+    assert!(!recent.screenshots_expired);
+
+    // Past metadata retention, observations go too.
+    h.expire(timeline::config::METADATA_RETENTION_MS + 3 * DAY)
+        .unwrap();
+    assert!(
+        q.cursor_evidence(Browser, 2, None)
+            .unwrap()
+            .focus
+            .iter()
+            .all(|row| !matches!(row.focus, FocusCoverage::Focus { .. }))
+    );
+}

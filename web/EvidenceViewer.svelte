@@ -2,7 +2,7 @@
   import ScreenshotCanvas from "./ScreenshotCanvas.svelte";
   import SuspenseBoundary from "./SuspenseBoundary.svelte";
   import { tick } from "svelte";
-  import { time, captureTime, categorySwatch, imageTransform, swatchStyle, UNCATEGORIZED } from "./format";
+  import { time, captureTime, categorySwatch, imageTransform, noScreenshot, swatchStyle, UNCATEGORIZED } from "./format";
   import type { TimelineApp, View } from "./model";
   import type { ImageFrame } from "./images";
   let { view, app }: { view: View; app: TimelineApp } = $props();
@@ -97,7 +97,7 @@
             </button>
           {:else if frame.error}<p class="error">{frame.error}</p>{/if}
         </figure>
-      {:else}<p class="empty">No screenshot evidence at this time.</p>{/each}
+      {:else}<p class="empty">{noScreenshot(view.shotsExpired)}</p>{/each}
     </SuspenseBoundary>
   </div>
 </section>

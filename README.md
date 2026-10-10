@@ -5,7 +5,7 @@ A local Rust desktop activity recorder for Linux, Wayland, and Hyprland.
 The recorder stores original active-window observations, input-idle state, and
 per-monitor screenshots in durable local history. It includes persistent
 pause/resume, explicit recording boundaries, bounded evidence inspection, and
-30-day retention. A shared Rust evidence service provides activity aggregation
+retention of 30 days for screenshots and a year for activity metadata. A shared Rust evidence service provides activity aggregation
 and coverage-aware screenshot selection, shared by a bundled browser timeline
 and read-only local MCP server. Integrated acceptance measurements and remaining gates are recorded in
 [the acceptance report](docs/acceptance/2026-09-22.md).
@@ -76,8 +76,12 @@ timing segments; focus duration must never be inferred across these boundaries.
 Disk/storage errors terminate the recorder with an error rather than acknowledging
 unsaved observations. The user service can then restart it.
 
-Metadata cleanup runs at startup and hourly for observations older than 30 elapsed
-days. A persisted retention clock uses elapsed boot time, including suspend, so a
+Cleanup runs at startup and hourly. Screenshots are kept for 30 elapsed days and
+observations, which are small (a few MB per day) and feed trends, for 365
+(`SCREENSHOT_RETENTION_MS` and `METADATA_RETENTION_MS` in `src/config.rs`). Older
+activity therefore stays visible without screenshots; once any have expired,
+`cursor_evidence` sets `screenshots_expired` for times before the oldest retained
+capture, and the browser says so rather than reporting missing evidence. A persisted retention clock uses elapsed boot time, including suspend, so a
 wall-clock jump cannot expire recent history during the same boot or recorder
 restart. Across a machine reboot, nonnegative wall-clock elapsed time is the
 fallback; elapsed time while powered off cannot be independently verified.
@@ -121,8 +125,9 @@ own client class rather than accepting it from a request. The service offers:
   maximum 500 records per page. Screenshot listings can filter by monitor.
 - `observation`: retrieve one retained original observation by ID.
 - `cursor_evidence`: focus and per-monitor screenshot evidence for a selected UTC
-  millisecond, including actual capture timestamps, unavailable samples and stale
-  flags. Repeated wall times return distinct timing segments.
+  millisecond, including actual capture timestamps, unavailable samples, stale
+  flags and whether screenshots there have expired. Repeated wall times return
+  distinct timing segments.
 - `image`: retrieve the exact screenshot ID and its metadata with a bounded byte
   stream; missing/expired references or files return `QueryError::Unavailable`.
   `preview` returns a lossy rendition of at most 64–4096 pixels per edge instead.

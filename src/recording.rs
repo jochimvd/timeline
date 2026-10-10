@@ -1,5 +1,5 @@
 //! Recording policy, independent of the compositor, wall clock and UI.
-use crate::config::{CHECKPOINT_INTERVAL_MS, CLEANUP_INTERVAL_MS, RETENTION_MS};
+use crate::config::{CHECKPOINT_INTERVAL_MS, CLEANUP_INTERVAL_MS};
 use crate::evidence::{BoundaryKind, Evidence, StateChange};
 use crate::history::History;
 use anyhow::Result;
@@ -55,7 +55,7 @@ impl Recorder {
         let previous = history.latest()?;
         let boot_id = std::fs::read_to_string("/proc/sys/kernel/random/boot_id")?;
         let retention_now = history.advance_retention_clock(&boot_id, stamp.boot_ms, stamp.unix_ms);
-        history.cleanup_before(retention_now - RETENTION_MS)?;
+        history.expire(retention_now)?;
         let manual_paused = history.manual_paused()?;
         let pressure = history.screenshot_pressure()?;
         let segment = history.start_segment()?;
@@ -131,7 +131,7 @@ impl Recorder {
             let retention_now =
                 self.history
                     .advance_retention_clock(&self.boot_id, stamp.boot_ms, stamp.unix_ms);
-            self.history.cleanup_before(retention_now - RETENTION_MS)?;
+            self.history.expire(retention_now)?;
             if self.history.cleanup_pending()? {
                 self.capture.pressure_cleanup = true;
                 self.invalidate_captures("disk_cleanup", stamp)?;
@@ -167,7 +167,7 @@ impl Recorder {
             self.history
                 .advance_retention_clock(&self.boot_id, stamp.boot_ms, stamp.unix_ms);
         if stamp.boot_ms - self.last_cleanup_ms >= CLEANUP_INTERVAL_MS {
-            self.history.cleanup_before(retention_now - RETENTION_MS)?;
+            self.history.expire(retention_now)?;
             self.last_cleanup_ms = stamp.boot_ms;
         }
         let elapsed = stamp.monotonic_ms - self.last_stamp.monotonic_ms;

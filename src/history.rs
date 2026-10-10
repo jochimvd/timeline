@@ -195,18 +195,40 @@ impl History {
         })
     }
 
+    /// Expire evidence older than its retention period at retention-clock
+    /// time `retention_now`: screenshots well before observations.
+    pub fn expire(&mut self, retention_now: i64) -> Result<usize> {
+        self.cleanup(
+            retention_now - crate::config::METADATA_RETENTION_MS,
+            retention_now - crate::config::SCREENSHOT_RETENTION_MS,
+        )
+    }
+
+    /// Remove all evidence recorded before one retention-clock cutoff.
     pub fn cleanup_before(&mut self, cutoff_retention_ms: i64) -> Result<usize> {
+        self.cleanup(cutoff_retention_ms, cutoff_retention_ms)
+    }
+
+    fn cleanup(&mut self, observations_before: i64, screenshots_before: i64) -> Result<usize> {
         let transaction = self.connection.transaction()?;
         let count = transaction.execute(
             "DELETE FROM observations WHERE retention_ms < ?1",
-            [cutoff_retention_ms],
+            [observations_before],
         )?;
         // Only images touched by this expiry can lose their final reference.
         // Avoid a full retained-image table scan on the metadata event thread.
-        crate::tiles::expire_images(&transaction, cutoff_retention_ms)?;
+        crate::tiles::expire_images(&transaction, screenshots_before)?;
+        // Remember how far screenshots have expired, so queries can tell
+        // expired screenshots apart from ones that were never captured.
+        transaction.execute(
+            "INSERT INTO state SELECT 'screenshots_expired_through', max(unix_ms)
+                FROM screenshots WHERE retention_ms < ?1 HAVING count(*) > 0
+            ON CONFLICT(key) DO UPDATE SET value=max(value, excluded.value)",
+            [screenshots_before],
+        )?;
         let screenshot_count = transaction.execute(
             "DELETE FROM screenshots WHERE retention_ms < ?1",
-            [cutoff_retention_ms],
+            [screenshots_before],
         )?;
         if count > 0 || screenshot_count > 0 {
             transaction.execute(

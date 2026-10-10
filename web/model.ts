@@ -30,9 +30,9 @@ export type View = {
   commits: CommitList | null;
   /** Why commits could not be read; the timeline remains usable. */
   commitError: string;
-  focus: Coverage[]; shots: Shot[]; frames: ImageFrame[] | null;
+  focus: Coverage[]; shots: Shot[]; frames: ImageFrame[] | null; shotsExpired: boolean;
   evidenceTime: number | null;
-  hoverEvidence: { time: number | null; focus: Coverage[]; frames: ImageFrame[] | null; error: string; loading: boolean };
+  hoverEvidence: { time: number | null; focus: Coverage[]; frames: ImageFrame[] | null; expired: boolean; error: string; loading: boolean };
   evidenceError: string; message: string;
 };
 
@@ -41,8 +41,8 @@ export function createTimelineApp() {
   let view: View = {
     date: "", timezone: Intl.DateTimeFormat().resolvedOptions().timeZone, settingsPath: null, zoom: "1", layout: "grid",
     navigationBusy: false, selected: 0, dayLoading: true, rangeLoading: false, highlight: null,
-    evidenceLoading: false, blocks: [], rows: [], categories: [], commits: null, commitError: "", focus: [], shots: [], frames: null,
-    hoverEvidence: { time: null, focus: [], frames: null, error: "", loading: false },
+    evidenceLoading: false, blocks: [], rows: [], categories: [], commits: null, commitError: "", focus: [], shots: [], frames: null, shotsExpired: false,
+    hoverEvidence: { time: null, focus: [], frames: null, expired: false, error: "", loading: false },
     evidenceTime: null, evidenceError: "", message: "",
   };
   const store = writable(view);
@@ -277,7 +277,7 @@ export function createTimelineApp() {
       const frames = unchanged ? view.frames! : await images.load(evidence.screenshots, view.layout, signal);
       if (generation !== selectionGeneration) return;
       displayedLayout = view.layout;
-      patch({ shots: evidence.screenshots, focus: evidence.focus, frames, evidenceTime: ms, evidenceError: "" });
+      patch({ shots: evidence.screenshots, shotsExpired: evidence.screenshots_expired, focus: evidence.focus, frames, evidenceTime: ms, evidenceError: "" });
     } catch (error) {
       if (generation === selectionGeneration) {
         patch({ evidenceError: "Could not load the selected moment." + (view.frames !== null ? " Previous evidence remains displayed." : "") });
@@ -298,11 +298,11 @@ export function createTimelineApp() {
       const evidence = await query<Evidence>("selection", { selected_ms: ms }, signal, generation, "hover");
       const frames = await hoverImages.load(evidence.screenshots, "grid", signal);
       if (generation === hoverGeneration && hoverActive)
-        patch({ hoverEvidence: { time: ms, focus: evidence.focus, frames, error: "", loading: false } });
+        patch({ hoverEvidence: { time: ms, focus: evidence.focus, frames, expired: evidence.screenshots_expired, error: "", loading: false } });
     } catch (error) {
       if (!signal.aborted && generation === hoverGeneration) {
         hoverImages.clear();
-        patch({ hoverEvidence: { time: ms, focus: [], frames: [], error: "Preview unavailable.", loading: false } });
+        patch({ hoverEvidence: { time: ms, focus: [], frames: [], expired: false, error: "Preview unavailable.", loading: false } });
       }
     } finally {
       if (generation === hoverGeneration) {

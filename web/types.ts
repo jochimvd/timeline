@@ -73,7 +73,7 @@ export type Shot = {
   stale: boolean;
 };
 
-export type Evidence = { selected_ms: number; focus: Coverage[]; screenshots: Shot[] };
+export type Evidence = { selected_ms: number; focus: Coverage[]; screenshots: Shot[]; screenshots_expired: boolean };
 
 export type OverviewUpdates = {
   revision: string; reset: boolean; totals: Overview["totals"] | null; metrics: FocusMetrics | null;
