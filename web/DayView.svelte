@@ -13,6 +13,13 @@
     timeline?.scrollIntoView({ behavior: "smooth", block: "center" });
     void app.reveal(range);
   }
+  /** Selects a moment, such as a commit, and moves keyboard focus to the timeline. */
+  function select(ms: number) {
+    const timeline = document.getElementById("timeline");
+    timeline?.focus({ preventScroll: true });
+    timeline?.scrollIntoView({ behavior: "smooth", block: "center" });
+    void app.navigateTo(ms);
+  }
 </script>
 
 <section class="panel" aria-label="Timeline">
@@ -20,5 +27,5 @@
 </section>
 <EvidenceViewer view={$view} {app} />
 <Breakdown rows={$view.rows} categories={$view.categories} totals={$view.totals} metrics={$view.metrics}
-  range={$view.loadedRange} timezone={$view.timezone} settingsPath={$view.settingsPath}
-  loading={$view.dayLoading || $view.rangeLoading} onreveal={reveal} />
+  commits={$view.commits} range={$view.loadedRange} timezone={$view.timezone} settingsPath={$view.settingsPath}
+  loading={$view.dayLoading || $view.rangeLoading} onreveal={reveal} onselect={select} />

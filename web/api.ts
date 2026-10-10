@@ -24,9 +24,9 @@ export async function request<T = unknown>(
       reason = (await response.json()).error || reason;
     } catch {}
     throw new Error(
-      reason === "unauthorized"
-        ? "Session expired. Run timeline open to reconnect."
-        : reason,
+      reason === "unauthorized" ? "Session expired. Run timeline open to reconnect."
+      : reason === "invalid_bootstrap" ? "This launch link was already used or has expired. Run timeline open for a new one."
+      : reason,
     );
   }
   const text = await response.text();

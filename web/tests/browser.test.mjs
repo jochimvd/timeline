@@ -19,6 +19,22 @@ async function assertServesCheckout(url) {
   }
 }
 
+/** Starts the synthetic fixture: its process, output lines and launch URL. */
+async function startFixture() {
+  const fixture = spawn("cargo", ["run", "--quiet", "--example", "web_fixture"], { stdio: ["pipe", "pipe", "inherit"] });
+  const lines = createInterface({ input: fixture.stdout });
+  const url = await new Promise((resolve, reject) => {
+    lines.once("line", resolve);
+    fixture.once("exit", (code) => reject(new Error(`Fixture exited ${code}`)));
+  });
+  await assertServesCheckout(url);
+  return { fixture, lines, url };
+}
+async function stopFixture(fixture) {
+  fixture.stdin.end("\n");
+  if (fixture.exitCode === null) await new Promise((resolve) => fixture.once("exit", resolve));
+}
+
 test("checked-in JavaScript matches Svelte and TypeScript", async () => {
   const dir = await mkdtemp(join(tmpdir(), "timeline-ts-"));
   try {
@@ -33,21 +49,9 @@ test("checked-in JavaScript matches Svelte and TypeScript", async () => {
 });
 
 test("bundled browser with real history, calendar, lanes, breakdown, monitors and obsolete responses", async () => {
-  const fixture = spawn(
-    "cargo",
-    ["run", "--quiet", "--example", "web_fixture"],
-    { stdio: ["pipe", "pipe", "inherit"] },
-  );
+  const { fixture, lines, url } = await startFixture();
   const browser = await chromium.launch({ headless: true });
   try {
-    const lines = createInterface({ input: fixture.stdout });
-    const url = await new Promise((resolve, reject) => {
-      lines.once("line", resolve);
-      fixture.once("exit", (code) =>
-        reject(new Error(`Fixture exited ${code}`)),
-      );
-    });
-    await assertServesCheckout(url);
     const context = await browser.newContext({
       viewport: { width: 1440, height: 1000 },
     });
@@ -761,22 +765,71 @@ test("bundled browser with real history, calendar, lanes, breakdown, monitors an
     assert.equal(fixture.exitCode, null);
   } finally {
     await browser.close();
-    fixture.stdin.end("\n");
-    if (fixture.exitCode === null)
-      await new Promise((resolve) => fixture.once("exit", resolve));
+    await stopFixture(fixture);
+  }
+});
+
+test("commit markers cluster, explain themselves, select their moment and report unreadable repositories", async () => {
+  const { fixture, url } = await startFixture();
+  const browser = await chromium.launch({ headless: true });
+  try {
+    const page = await (await browser.newContext({ viewport: { width: 1440, height: 1000 } })).newPage();
+    const errors = [];
+    page.on("pageerror", (e) => errors.push(e.message));
+    await page.clock.setFixedTime(new Date("2026-09-23T12:00:00Z"));
+    const launch = new URL(url);
+    await page.goto(`${launch.origin}/?date=2026-09-22${launch.hash}`);
+    await page.waitForFunction(() => document.querySelectorAll("#commit-track .commit-marker").length
+      && document.querySelector("#timeline").getAttribute("aria-busy") === "false");
+    // Commits at 04:10:00 and 04:10:30 share a marker at full-day scale; 04:35 and 04:55 stand apart.
+    const markers = page.locator("#commit-track .commit-marker");
+    assert.equal(await markers.count(), 3);
+    assert.equal(await markers.first().innerText(), "2");
+    assert.match(await markers.first().getAttribute("aria-label"), /^2 commits: timeline: Plan the commit track \([0-9a-f]{7}, 04:10:00\); timeline: Fix marker spacing/);
+    assert.match(await page.locator(".commit-label").innerText(), /Commits · 4 in view[\s\S]*1 repository or path could not be read/);
+    await markers.first().hover();
+    const tooltip = page.locator("#timeline-tooltip");
+    assert.match(await tooltip.innerText(), /Plan the commit track\s+timeline · main · [0-9a-f]{7} · 04:10:00[\s\S]*Fix marker spacing/);
+
+    // One tab stop: arrows move between markers, Enter selects the commit's moment.
+    await page.mouse.move(0, 0);
+    await markers.first().focus();
+    assert.match(await tooltip.innerText(), /Plan the commit track/, "focus shows the tooltip");
+    await page.keyboard.press("ArrowRight");
+    assert.equal(await page.evaluate(() => document.activeElement.getAttribute("aria-label")).then(label => label.startsWith("Commit notes: Notes on markers")), true);
+    assert.deepEqual(await markers.evaluateAll(nodes => nodes.map(node => node.tabIndex)), [-1, 0, -1]);
+    await page.keyboard.press("Enter");
+    await page.waitForFunction(() => document.querySelector("#selected")?.textContent.includes("04:35:00"));
+
+    // Zooming in on the cluster separates its commits.
+    await page.locator("#zoom").selectOption("fit");
+    await page.waitForFunction(() => document.querySelector("#zoom").value === "fit"
+      && document.querySelector("#timeline").getAttribute("aria-busy") === "false");
+    await markers.first().hover();
+    await page.mouse.wheel(0, -100);
+    await page.waitForFunction(() => document.querySelector("#timeline").getAttribute("aria-busy") === "false"
+      && document.querySelectorAll("#commit-track .commit-marker").length >= 2 && !document.querySelector("#commit-track .cluster"));
+
+    // The breakdown lists the loaded range's commits; each selects its moment.
+    await page.locator("summary", { hasText: "Commits (" }).click();
+    assert.match(await page.locator("#commit-list").innerText(), /04:10:00\s+Plan the commit track\s+timeline · main · [0-9a-f]{7}/);
+
+    // The track's problem opens the repository details with the unreadable one.
+    await page.locator(".commit-problem").click();
+    await page.waitForFunction(() => document.querySelector("#repositories").open
+      && document.querySelector("#repositories-found"));
+    assert.match(await page.locator("#repositories").innerText(), /2 repositories in[\s\S]*broken · broken \.git file/);
+    assert.deepEqual(errors, []);
+  } finally {
+    await browser.close();
+    await stopFixture(fixture);
   }
 });
 
 test("week and month views summarize days, compare honestly and drill into the day view", async () => {
-  const fixture = spawn("cargo", ["run", "--quiet", "--example", "web_fixture"], { stdio: ["pipe", "pipe", "inherit"] });
+  const { fixture, url } = await startFixture();
   const browser = await chromium.launch({ headless: true });
   try {
-    const lines = createInterface({ input: fixture.stdout });
-    const url = await new Promise((resolve, reject) => {
-      lines.once("line", resolve);
-      fixture.once("exit", (code) => reject(new Error(`Fixture exited ${code}`)));
-    });
-    await assertServesCheckout(url);
     const page = await (await browser.newContext({ viewport: { width: 1440, height: 1000 } })).newPage();
     const errors = [];
     page.on("pageerror", (e) => errors.push(e.message));
@@ -806,8 +859,14 @@ test("week and month views summarize days, compare honestly and drill into the d
     await page.locator("#color-by label", { hasText: "Application" }).click();
     await page.locator(".day-column").nth(1).hover();
     assert.match(await page.locator("#daily-tooltip").innerText(), /1h\s+Editor[\s\S]*1h\s+Recorded focus/);
+    // Commits per day: beneath the columns, in the tooltip and in the table.
+    await page.waitForFunction(() => document.querySelector("#commit-row"));
+    assert.deepEqual(await page.locator("#commit-row > span").allInnerTexts(), ["", "4", "1", "", "", "", ""]);
+    assert.match(await page.locator("#daily-tooltip").innerText(), /4 commits · timeline 3, notes 1/);
+    assert.match(await page.locator(".day-column").nth(2).getAttribute("aria-label"), /, 1 commit\. Open day\.$/, "a day without focus evidence can still have commits");
+    assert.match(await page.locator("#period-commits").innerText(), /5 commits this week[\s\S]*1 repository or path could not be read/);
     await page.locator("summary", { hasText: "Daily totals table" }).click();
-    assert.match(await page.locator("#daily-table tbody tr").nth(1).innerText(), /Tue 22 Sept\s+1h\s+0 min\s+1h\s+1h/);
+    assert.match(await page.locator("#daily-table tbody tr").nth(1).innerText(), /Tue 22 Sept\s+1h\s+0 min\s+1h\s+1h[\s\S]*\s4$/);
     const heatRow = page.locator(".heatmap-row").nth(2);
     assert.match(await heatRow.locator(".heat-cell").first().getAttribute("aria-label"), /Tue 22 Sept 04:00–05:00: 1h active focus/);
 
@@ -850,7 +909,6 @@ test("week and month views summarize days, compare honestly and drill into the d
     assert.deepEqual(errors, []);
   } finally {
     await browser.close();
-    fixture.stdin.end("\n");
-    if (fixture.exitCode === null) await new Promise((resolve) => fixture.once("exit", resolve));
+    await stopFixture(fixture);
   }
 });

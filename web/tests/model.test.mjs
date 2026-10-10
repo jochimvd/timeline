@@ -29,10 +29,12 @@ test("date transitions retain a complete snapshot through resolution, paging, er
   const requests = [];
   let respond = (operation, args) => operation === "resolve_range"
     ? { range: day(args.date), timezone: "UTC" } : overview(args.range);
+  // Commits follow each overview read; they name the range they were read for.
+  let commits = args => ({ resolved: { range: args.range, timezone: "UTC" }, configured: true, commits: [], days: [], repositories: 1, problems: [], settings_problem: null });
   globalThis.fetch = async (url, options) => {
     const operation = url.split("/").at(-1), args = JSON.parse(options.body);
     requests.push({ operation, args });
-    const result = await respond(operation, args);
+    const result = await (operation === "commits" ? commits(args) : respond(operation, args));
     return result instanceof Response ? result : Response.json(result);
   };
   const app = createTimelineApp();
@@ -41,6 +43,7 @@ test("date transitions retain a complete snapshot through resolution, paging, er
   try {
     await app.loadDay("2026-09-22");
     const first = view;
+    assert.deepEqual(first.commits.resolved.range, first.loadedRange, "commits arrive with their rows");
     const resolveDay = deferred(), readDay = deferred(), readStarted = deferred();
     respond = (operation, args) => {
       if (operation === "resolve_range") return resolveDay.promise;
@@ -63,9 +66,13 @@ test("date transitions retain a complete snapshot through resolution, paging, er
     await pageStarted.promise;
     assert.equal(view.blocks, first.blocks);
     assert.equal(view.totals, first.totals);
+    // Unreadable commits leave the timeline usable and say why.
+    commits = () => new Response(JSON.stringify({ error: "unavailable" }), { status: 404 });
     nextPage.resolve({ items: [], next_cursor: null, truncated: false });
     await pending;
     assert.equal(view.blocks[0].group.application, "Browser");
+    assert.equal(view.commits, null);
+    assert.equal(view.commitError, "unavailable");
     assert.deepEqual(view.visible, day("2026-09-23"));
     assert.equal(view.loadedRange, view.visible);
     assert.equal(view.rangeLoading, false);
@@ -100,7 +107,8 @@ test("date transitions retain a complete snapshot through resolution, paging, er
 
     const beforeRevisit = requests.length;
     await app.loadDay("2026-09-23");
-    assert.equal(requests.length - beforeRevisit, 1, "revisiting a resolved date needs only its actual overview");
+    assert.deepEqual(requests.slice(beforeRevisit).map(r => r.operation), ["overview", "commits"],
+      "revisiting a resolved date needs only its actual overview and commits");
     assert.ok(requests.filter(r => r.operation === "overview").every(r => r.args.range && !r.args.date),
       "day changes never scan a discarded overview just to resolve calendar boundaries");
   } finally {

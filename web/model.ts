@@ -3,7 +3,7 @@ import { query, pages } from "./api";
 import type { Session } from "./session";
 import { activityDate as activityDateIn, addDays } from "./dates";
 import { createImageLoader, createImagePool, type ImageFrame } from "./images";
-import type { Range, Block, CategoryRow, Coverage, FocusMetrics, Overview, Shot, Evidence, OverviewUpdates } from "./types";
+import type { Range, Block, CategoryRow, CommitList, Coverage, FocusMetrics, Overview, Shot, Evidence, OverviewUpdates } from "./types";
 
 export const zoomLevels: { value: string; label: string; durationMs?: number }[] = [
   { value: "1", label: "Full day" }, { value: "2", label: "12 hours" },
@@ -26,6 +26,10 @@ export type View = {
   highlight: Range | null;
   /** Configured categories plus uncategorized focus, most time first. */
   categories: CategoryRow[];
+  /** The user's git commits in the loaded range, swapped together with its rows. */
+  commits: CommitList | null;
+  /** Why commits could not be read; the timeline remains usable. */
+  commitError: string;
   focus: Coverage[]; shots: Shot[]; frames: ImageFrame[] | null;
   evidenceTime: number | null;
   hoverEvidence: { time: number | null; focus: Coverage[]; frames: ImageFrame[] | null; error: string; loading: boolean };
@@ -37,7 +41,7 @@ export function createTimelineApp() {
   let view: View = {
     date: "", timezone: Intl.DateTimeFormat().resolvedOptions().timeZone, settingsPath: null, zoom: "1", layout: "grid",
     navigationBusy: false, selected: 0, dayLoading: true, rangeLoading: false, highlight: null,
-    evidenceLoading: false, blocks: [], rows: [], categories: [], focus: [], shots: [], frames: null,
+    evidenceLoading: false, blocks: [], rows: [], categories: [], commits: null, commitError: "", focus: [], shots: [], frames: null,
     hoverEvidence: { time: null, focus: [], frames: null, error: "", loading: false },
     evidenceTime: null, evidenceError: "", message: "",
   };
@@ -66,6 +70,7 @@ export function createTimelineApp() {
   let interactionGeneration = 0;
   let rawRows: Coverage[] = [];
   let refreshing = false;
+  let commitsRead = 0;
   // Only calendar metadata is cached; activity still comes from a fresh snapshot.
   const resolvedDays = new Map<string, Overview["resolved"]>();
 
@@ -123,13 +128,28 @@ export function createTimelineApp() {
     patch({ ...transition, rows, blocks, categories, totals, metrics, loadedRange: range, rangeLoading: false,
       message: blocks.length ? "" : "No recorded focus in this range. Coverage and screenshots may differ." });
   }
+  /** Commits are external evidence: a failure leaves the timeline usable and says why. */
+  async function readCommits(range: Range, signal: AbortSignal): Promise<Pick<View, "commits" | "commitError">> {
+    commitsRead = Date.now();
+    try {
+      const commits = await query<CommitList>("commits", { range }, signal);
+      return { commits, commitError: "" };
+    } catch (error) {
+      signal.throwIfAborted();
+      return { commits: null, commitError: error instanceof Error ? error.message : String(error) };
+    }
+  }
+  /** One complete range: overview rows, then commits, sequentially so a range
+   *  load occupies at most one query admission slot. */
   async function readRange(range: Range, signal: AbortSignal) {
     const display_points = displayPoints;
     const overview = await query<Overview>("overview", { range, limit: 500, display_points }, signal);
     signal.throwIfAborted();
     const raw = await pages<Coverage>("overview", { range, display_points }, signal, overview);
     signal.throwIfAborted();
-    return { overview, raw };
+    const commits = await readCommits(range, signal);
+    signal.throwIfAborted();
+    return { overview, raw, commits };
   }
   async function loadRange(background = false) {
     if (!view.visible) return;
@@ -142,9 +162,9 @@ export function createTimelineApp() {
     // Retain the old rows and images during a range change; Svelte repositions them.
     patch({ rangeLoading: true });
     try {
-      const { overview, raw } = await readRange(range, signal);
+      const { overview, raw, commits } = await readRange(range, signal);
       if (generation !== rangeGeneration) return;
-      publishRows(raw, overview, overview.revision, range);
+      publishRows(raw, overview, overview.revision, range, commits);
     } catch (error) {
       if (generation === rangeGeneration) { patch({ rangeLoading: false }); failure(error); }
     }
@@ -181,6 +201,11 @@ export function createTimelineApp() {
           update.revision, args.range);
         if (hoverActive && !hoverPending && hoverTimer === undefined) hoverTimer = setTimeout(flushHover, 100);
       } else revision = update.revision;
+      // New commits do not change the overview; check them about once a minute.
+      if (Date.now() - commitsRead >= 60_000) {
+        const commits = await readCommits(args.range, signal);
+        if (generation === rangeGeneration) patch(commits);
+      }
     } catch (error) {
       if (generation === rangeGeneration && !signal.aborted) {
         if (error instanceof Error && error.message === "cursor_invalidated") await loadRange(true);
@@ -222,10 +247,10 @@ export function createTimelineApp() {
       const range = { start_ms: start, end_ms: start + width };
       // Resolve boundaries without scanning a full day whose overview would be
       // discarded whenever the dragged range straddles two activity days.
-      const { overview, raw } = await readRange(range, signal);
+      const { overview, raw, commits } = await readRange(range, signal);
       if (generation !== rangeGeneration) return;
       loadedDate = date;
-      publishRows(raw, overview, overview.revision, range, {
+      publishRows(raw, overview, overview.revision, range, { ...commits,
         day, timezone: resolved.timezone, visible: range, zoom, dayLoading: false,
         ...(center === undefined ? { fitWidth: undefined } : {}),
         ...(view.frames === null ? { selected: selected ?? range.start_ms } : {}),

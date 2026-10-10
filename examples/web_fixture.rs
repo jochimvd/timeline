@@ -1,7 +1,10 @@
 //! Synthetic browser acceptance fixture. Never connects to a desktop or captures it.
 //!
 //! `cargo run --example web_fixture -- --demo [address]` instead serves three weeks
-//! of varied synthetic focus with demo categories, for looking at the UI.
+//! of varied synthetic focus with demo categories and commits, for looking at the UI.
+//!
+//! Commits come from temporary git repositories. Git is isolated from the
+//! developer's configuration, and both fixtures use only temporary directories.
 use std::{
     io::{BufRead, Write},
     sync::{
@@ -39,7 +42,54 @@ name = "Communication"
 application = "Chat"
 "##;
 
+/// Git for this process and its fixture repositories: a temporary global
+/// configuration with a demo identity, never the developer's.
+fn isolate_git() -> anyhow::Result<tempfile::TempDir> {
+    let directory = tempfile::tempdir()?;
+    let global = directory.path().join("gitconfig");
+    std::fs::write(
+        &global,
+        "[user]\n\tname = Demo\n\temail = demo@example.com\n[init]\n\tdefaultBranch = main\n",
+    )?;
+    // SAFETY: called first in main, before any other thread exists.
+    unsafe {
+        std::env::set_var("GIT_CONFIG_GLOBAL", &global);
+        std::env::set_var("GIT_CONFIG_NOSYSTEM", "1");
+    }
+    Ok(directory)
+}
+
+/// Runs git in `directory` as if at `ms`, which dates the commit and its reflog entry.
+fn git(directory: &std::path::Path, ms: i64, arguments: &[&str]) -> anyhow::Result<()> {
+    let date = format!("@{} +0000", ms / 1000);
+    let output = std::process::Command::new("git")
+        .current_dir(directory)
+        .args(arguments)
+        .env("GIT_AUTHOR_DATE", &date)
+        .env("GIT_COMMITTER_DATE", &date)
+        .output()?;
+    anyhow::ensure!(
+        output.status.success(),
+        "git {arguments:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Ok(())
+}
+
+/// A repository at `directory` with one commit per `(ms, subject)`.
+fn repository(directory: &std::path::Path, commits: &[(i64, &str)]) -> anyhow::Result<()> {
+    std::fs::create_dir_all(directory)?;
+    git(directory, 0, &["init", "-q"])?;
+    for (index, (ms, subject)) in commits.iter().enumerate() {
+        std::fs::write(directory.join("work.txt"), format!("{index}\n"))?;
+        git(directory, *ms, &["add", "work.txt"])?;
+        git(directory, *ms, &["commit", "-q", "-m", subject])?;
+    }
+    Ok(())
+}
+
 fn main() -> anyhow::Result<()> {
+    let _git = isolate_git()?;
     let arguments: Vec<String> = std::env::args().skip(1).collect();
     if arguments.first().map(String::as_str) == Some("--demo") {
         return demo(arguments.get(1).map_or("127.0.0.1:47832", String::as_str));
@@ -47,8 +97,32 @@ fn main() -> anyhow::Result<()> {
     let dir = tempfile::tempdir()?;
     let config = tempfile::tempdir()?;
     let settings = config.path().join("config.toml");
-    std::fs::write(&settings, CATEGORIES)?;
     let base = 1790042400000; // 2026-09-22 04:00 Europe/Oslo
+    // Two commits close together cluster at full-day scale, others stay apart;
+    // one repository is broken.
+    let work = tempfile::tempdir()?;
+    repository(
+        &work.path().join("projects/timeline"),
+        &[
+            (base + 600_000, "Plan the commit track"),
+            (base + 630_000, "Fix marker spacing"),
+            (base + 3_300_000, "Write the browser test"),
+            (base + 86_400_000 + 10_800_000, "Follow up on review"),
+        ],
+    )?;
+    repository(
+        &work.path().join("projects/notes"),
+        &[(base + 2_100_000, "Notes on markers")],
+    )?;
+    std::fs::create_dir_all(work.path().join("broken"))?;
+    std::fs::write(work.path().join("broken/.git"), "gitdir: ../missing\n")?;
+    std::fs::write(
+        &settings,
+        format!(
+            "{CATEGORIES}\n[git]\npaths = [{:?}]\n",
+            work.path().display().to_string()
+        ),
+    )?;
     let mut recorder = Recorder::open(dir.path(), stamp(base, base))?;
     recorder.apply(
         Input::Connected {
@@ -257,7 +331,14 @@ fn demo(address: &str) -> anyhow::Result<()> {
     let dir = tempfile::tempdir()?;
     let config = tempfile::tempdir()?;
     let settings = config.path().join("config.toml");
-    std::fs::write(&settings, DEMO_CATEGORIES)?;
+    let work = tempfile::tempdir()?;
+    std::fs::write(
+        &settings,
+        format!(
+            "{DEMO_CATEGORIES}\n[git]\npaths = [{:?}]\n",
+            work.path().display().to_string()
+        ),
+    )?;
     let zone: chrono_tz::Tz = timeline::config::activity_timezone().parse()?;
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)?
@@ -364,12 +445,68 @@ fn demo(address: &str) -> anyhow::Result<()> {
         }
         recorder.apply(Input::Pause, stamp(end, base))?;
     }
+    demo_commits(work.path(), first, now, local)?;
     let stop = Arc::new(AtomicBool::new(false));
     let web = Web::configured(dir.path(), address, Some(settings.clone()))?;
     let server = timeline::web::start(web.clone(), stop)?;
     println!("{}", web.launch_url()?);
     println!("history {}", dir.path().display());
     println!("settings {}", settings.display());
+    println!("repositories {}", work.path().display());
     std::io::stdout().flush()?;
     server.join().unwrap()
+}
+
+/// Commits in two repositories during working hours, including on the day
+/// without recorded evidence: commits remain evidence when the recorder is off.
+fn demo_commits(
+    work: &std::path::Path,
+    first: chrono::NaiveDate,
+    now: i64,
+    local: impl Fn(chrono::NaiveDate, u32, u32) -> i64,
+) -> anyhow::Result<()> {
+    use chrono::Datelike;
+    const SUBJECTS: &[&str] = &[
+        "Show commits on the timeline",
+        "Cluster markers that overlap",
+        "Count commits per day",
+        "Fix the tooltip position",
+        "Read reflogs instead of commit dates",
+        "Handle repositories without reflogs",
+        "Tidy the settings parser",
+        "Explain missing evidence in the week view",
+        "Speed up repository discovery",
+        "Add a test for worktrees",
+    ];
+    let mut seed: u64 = 0xc0ffee;
+    let mut random = move |limit: u64| {
+        seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        (seed >> 33) % limit
+    };
+    let mut timeline = Vec::new();
+    let mut notes = Vec::new();
+    for offset in 0..21 {
+        let date = first + chrono::Days::new(offset);
+        let weekend = date.weekday().number_from_monday() > 5;
+        let (count, from, minutes) = if weekend {
+            (random(2), local(date, 10, 15), 120)
+        } else {
+            (random(7), local(date, 9, 20), 460)
+        };
+        for _ in 0..count {
+            let at = from + 60_000 * random(minutes) as i64;
+            timeline.push((at, SUBJECTS[random(SUBJECTS.len() as u64) as usize]));
+        }
+        if !weekend && random(3) == 0 {
+            notes.push((from + 60_000 * random(minutes) as i64, "Daily notes"));
+        }
+    }
+    for (name, mut commits) in [("projects/timeline", timeline), ("notes", notes)] {
+        commits.retain(|(at, _)| *at <= now);
+        commits.sort();
+        repository(&work.join(name), &commits)?;
+    }
+    Ok(())
 }

@@ -3,12 +3,13 @@
   import SuspenseBoundary from "./SuspenseBoundary.svelte";
   import { onMount } from "svelte";
   import { on } from "svelte/events";
-  import { applicationSwatch, categorySwatch, clockRange, coverageBands, duration, swatchStyle, time, imageTransform, UNCATEGORIZED, type Swatch } from "./format";
+  import { applicationSwatch, categorySwatch, clock, clockRange, coverageBands, duration, swatchStyle, time, imageTransform, UNCATEGORIZED, type Swatch } from "./format";
   import { hourSwitches, plural, SWITCH_LEVELS, switchLevel, switchLevelLabel } from "./metrics";
   import { zoomLevels, type TimelineApp, type View } from "./model";
   import { colorBy } from "./preferences";
   import ColorBy from "./ColorBy.svelte";
-  import type { Block, Range } from "./types";
+  import { clusterCommits, commitCount, commitProblems, repositoryLabel, repositorySummary, type CommitCluster } from "./commits";
+  import type { Block, Commit, Range } from "./types";
   let { view, app }: { view: View; app: TimelineApp } = $props();
   const blocks = $derived(view.blocks);
   const rows = $derived(view.rows);
@@ -35,6 +36,69 @@
     + `${plural(hourSwitches(hour, mode), switchNoun, switchNoun + "es")} in ${duration(hour.active_ms)} active`;
   let timelineWidth = $state(0);
   $effect(() => app.setWidth(timelineWidth));
+  // Commits: markers clustered where they would overlap at the current scale.
+  const commitList = $derived(view.commits);
+  const showCommits = $derived(!!commitList?.configured || !!view.commitError);
+  const clusters = $derived(visible && commitList ? clusterCommits(commitList.commits, visible, timelineWidth) : []);
+  const commitsInView = $derived(clusters.reduce((sum, cluster) => sum + cluster.commits.length, 0));
+  const commitProblem = $derived(view.commitError ? "Commits unavailable: " + view.commitError : commitProblems(commitList));
+  let commitFocus = $state(0);
+  const commitTab = $derived(Math.min(commitFocus, Math.max(0, clusters.length - 1)));
+  const commitButtons: HTMLButtonElement[] = [];
+  let keyboardCluster = $state<CommitCluster | null>(null);
+  const clusterTime = (cluster: CommitCluster) => Math.round((cluster.start_ms + cluster.end_ms) / 2);
+  /** The marker under the hover line, within its drawn extent. */
+  const hoverCluster = $derived.by(() => {
+    if (keyboardCluster) return keyboardCluster;
+    if (hoverTime === null || !visible || timelineWidth <= 0) return undefined;
+    const slack = 7 * (visible.end_ms - visible.start_ms) / timelineWidth;
+    return clusters.find(cluster => cluster.start_ms - slack <= hoverTime! && hoverTime! <= cluster.end_ms + slack);
+  });
+  const describeCommit = (commit: Commit) => `${repositoryLabel(commit.repository)}: ${commit.subject} (${commit.short_hash}, ${time(commit.time_ms, timezone)})`;
+  const describeCluster = (cluster: CommitCluster) => (cluster.commits.length === 1 ? "Commit " : commitCount(cluster.commits.length) + ": ")
+    + cluster.commits.slice(0, 3).map(describeCommit).join("; ") + (cluster.commits.length > 3 ? `; and ${cluster.commits.length - 3} more` : "")
+    + ". Enter selects this moment.";
+  /** Shows a focused marker's commits in the tooltip, like hovering it. */
+  function focusCommit(index: number, element: HTMLElement) {
+    commitFocus = index;
+    const cluster = clusters[index];
+    const rect = element.getBoundingClientRect();
+    keyboardCluster = cluster;
+    pointerX = rect.left + rect.width / 2;
+    pointerY = rect.bottom;
+    hoverTime = clusterTime(cluster);
+    app.hover(hoverTime);
+  }
+  function blurCommit() {
+    if (!keyboardCluster) return;
+    keyboardCluster = null;
+    leave();
+  }
+  function selectCommit(event: MouseEvent, cluster: CommitCluster) {
+    event.stopPropagation();
+    if (!view.dayLoading) void app.select(cluster.commits[0].time_ms);
+  }
+  function commitKey(event: KeyboardEvent, index: number) {
+    // Arrows move between markers rather than stepping screenshots.
+    if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
+      event.preventDefault();
+      event.stopPropagation();
+      const next = Math.max(0, Math.min(clusters.length - 1, index + (event.key === "ArrowRight" ? 1 : -1)));
+      commitButtons[next]?.focus();
+    } else if (event.key === "Escape") {
+      event.stopPropagation();
+      blurCommit();
+    } else if (event.key === "Enter" || event.key === " ") event.stopPropagation();
+  }
+  /** Opens and shows the repository details at the end of the page. */
+  function showRepositories(event: MouseEvent) {
+    event.stopPropagation();
+    const details = document.getElementById("repositories") as HTMLDetailsElement | null;
+    if (!details) return;
+    details.open = true;
+    details.scrollIntoView({ behavior: "smooth", block: "center" });
+    details.querySelector("summary")?.focus({ preventScroll: true });
+  }
   let hoverTime = $state<number | null>(null);
   const hoverHour = $derived(hoverTime === null ? undefined
     : hours.find(hour => hour.range.start_ms <= hoverTime! && hoverTime! < hour.range.end_ms));
@@ -92,6 +156,8 @@
     const timer = setInterval(() => now = Date.now(), 1000);
     return () => { clearInterval(timer); cancelPanFrame(); };
   });
+  // Seconds matter only when ticks are minutes apart.
+  const tickLabel = (ms: number) => visible && visible.end_ms - visible.start_ms >= 20 * 60_000 ? clock(ms, timezone) : time(ms, timezone);
   const percent = (ms: number) => visible ? 100 * (ms - visible.start_ms) / (visible.end_ms - visible.start_ms) : 0;
   const inView = (ms: number) => !!visible && ms >= visible.start_ms && ms < visible.end_ms;
   const position = (range: Range) => "left:" + percent(range.start_ms) + "%;width:" + (percent(range.end_ms) - percent(range.start_ms)) + "%";
@@ -117,6 +183,7 @@
       }
       return;
     }
+    keyboardCluster = null;
     pointerX = event.clientX;
     pointerY = event.clientY;
     hoverTime = pointerTime(event);
@@ -265,6 +332,27 @@
         {/each}
       </div>
     {/if}
+    {#if showCommits}
+      <div class="track-label commit-label">
+        <span>Commits · {view.commitError ? "unavailable" : commitList?.commits.length ? `${commitsInView} in view` : "none in this range"}</span>
+        {#if commitProblem}
+          <button class="link-button commit-problem" onpointerdown={event => event.stopPropagation()} onclick={showRepositories}>{commitProblem}</button>
+        {/if}
+      </div>
+      <div class="track commit-track" id="commit-track" role="group" aria-label="Commits · arrows move between markers, Enter selects">
+        {#each clusters as cluster, index (cluster.key)}
+          {@const multiple = cluster.commits.length > 1}
+          <button bind:this={commitButtons[index]} class="commit-marker" class:cluster={multiple}
+            style:left={percent(cluster.start_ms) + "%"} style:width={multiple ? `calc(${percent(cluster.end_ms) - percent(cluster.start_ms)}% + 16px)` : undefined}
+            tabindex={index === commitTab ? 0 : -1} aria-label={describeCluster(cluster)}
+            aria-describedby={keyboardCluster === cluster ? "timeline-tooltip" : undefined}
+            onpointerdown={event => event.stopPropagation()} onclick={event => selectCommit(event, cluster)}
+            onkeydown={event => commitKey(event, index)} onfocus={event => focusCommit(index, event.currentTarget)} onblur={blurCommit}>
+            {#if multiple}<span class="commit-count">{cluster.commits.length}</span>{/if}
+          </button>
+        {/each}
+      </div>
+    {/if}
     {#each imageTracks as track (track.monitor)}
       <div class="track-label">Screenshots · {track.monitor}</div>
       <div class="track">
@@ -289,7 +377,7 @@
       aria-label={"Current time: " + time(now, timezone)} style:left={percent(now) + "%"}><span>Now</span></div>
     <div class="ticks">
       {#each [0, 0.25, 0.5, 0.75, 1] as fraction}
-        <span>{time(visible.start_ms + fraction * (visible.end_ms - visible.start_ms), timezone)}</span>
+        <span>{tickLabel(visible.start_ms + fraction * (visible.end_ms - visible.start_ms))}</span>
       {/each}
     </div>
   {/if}
@@ -299,6 +387,20 @@
     bind:clientWidth={popupWidth} bind:clientHeight={popupHeight}
     style:left={popupX + "px"} style:top={popupY + "px"}>
     <strong class="tooltip-time">{time(hoverTime, timezone)}</strong>
+    {#if hoverCluster}
+      <ul class="tooltip-commits" aria-label={commitCount(hoverCluster.commits.length)}>
+        {#each hoverCluster.commits.slice(0, 4) as commit (commit.repository + commit.hash)}
+          <li>
+            <span class="commit-key" aria-hidden="true"></span>
+            <span class="commit-text">
+              <span class="commit-subject">{commit.subject}</span>
+              <small>{repositoryLabel(commit.repository)}{commit.branch ? ` · ${commit.branch}` : ""} · <code>{commit.short_hash}</code> · {time(commit.time_ms, timezone)}{commit.amends ? ` · amended, first ${time(commit.first_ms!, timezone)}` : ""}</small>
+            </span>
+          </li>
+        {/each}
+        {#if hoverCluster.commits.length > 4}<li class="muted">and {hoverCluster.commits.length - 4} more · {repositorySummary(hoverCluster.commits)}</li>{/if}
+      </ul>
+    {/if}
     <div class="tooltip-focus">
     {#if exactFocus?.kind === "focus"}
       <strong>{exactFocus.window!.application}{exactFocus.idle ? " · idle" : ""}</strong>

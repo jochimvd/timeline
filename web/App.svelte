@@ -2,6 +2,7 @@
   import { onMount, tick, untrack } from "svelte";
   import DayView from "./DayView.svelte";
   import PeriodView from "./PeriodView.svelte";
+  import RepositoryDetails from "./RepositoryDetails.svelte";
   import StorageDetails from "./StorageDetails.svelte";
   import { activityDate, dateLabel } from "./dates";
   import { createTimelineApp } from "./model";
@@ -130,6 +131,7 @@
   {:else if selected}
     <PeriodView model={periods} period={selected} {today} onperiod={changePeriod} onopen={(date, range) => void openDay(date, range)} />
   {/if}
+  <RepositoryDetails settingsPath={session?.settingsPath ?? null} {timezone} />
   <StorageDetails />
   <footer>Activity days begin at 04:00; weeks begin on Monday. Closing this page leaves recording running.</footer>
 </main>

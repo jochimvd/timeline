@@ -5,6 +5,7 @@
   import StatTile from "./StatTile.svelte";
   import SubjectComparison from "./SubjectComparison.svelte";
   import TrendChart from "./TrendChart.svelte";
+  import { commitCount, commitDays, commitProblems } from "./commits";
   import { dateSpan, shortDate } from "./dates";
   import { applicationSwatch, categorySwatch, clock, clockRange, duration, swatchStyle, type Swatch } from "./format";
   import { plural } from "./metrics";
@@ -37,6 +38,11 @@
   /** A comparison is meaningful only if the comparison period has any evidence. */
   const comparable = $derived(!!previous && previous.observed_ms > 0);
   const dates = $derived(data?.days.map(day => day.date) ?? []);
+  // Commits of the loaded period only; a period still loading shows none.
+  const commitList = $derived($view.commits && $view.commits.resolved.range.start_ms === data?.resolved.range.start_ms ? $view.commits : null);
+  const commits = $derived(commitList ? commitDays(commitList) : undefined);
+  const commitNote = $derived($view.commitError ? `Commits unavailable: ${$view.commitError}.`
+    : commitProblems(commitList) ? `Commits may be missing: ${commitProblems(commitList)}.` : "");
 
   const swatch = (subject: Subject): Swatch => subject.category !== undefined
     ? categorySwatch($view.categories.find(category => category.name === subject.category))
@@ -130,14 +136,17 @@
 
       <section class="period-section" aria-labelledby="daily-heading">
         <h3 id="daily-heading">Focus by day <span class="muted">· active focus by {mode}, idle on top</span></h3>
-        <DailyFocusChart days={data.days} subjects={stack} {swatch} {now} onopen={date => onopen(date)}
+        <DailyFocusChart days={data.days} subjects={stack} {swatch} {now} {commits} onopen={date => onopen(date)}
           onshift={delta => onperiod(period.first, delta)} onhome={() => onperiod(null)} />
+        {#if commitList}
+          <p class="muted commit-note" id="period-commits">{commitCount(commitList.commits.length)} this {kindName} in your repositories{commitNote ? ` · ${commitNote}` : "."}</p>
+        {:else if commitNote}<p class="muted commit-note" id="period-commits">{commitNote}</p>{/if}
         <details class="breakdown-details">
           <summary>Daily totals table</summary>
           <div class="table-scroll">
             <table class="data-table" id="daily-table">
               <thead><tr><th scope="col">Day</th>{#each stack as subject (subject.key)}<th scope="col">{subject.name}</th>{/each}
-                <th scope="col">Idle</th><th scope="col">Recorded focus</th><th scope="col">Evidence</th><th scope="col">Gaps</th><th scope="col">Unknown</th></tr></thead>
+                <th scope="col">Idle</th><th scope="col">Recorded focus</th><th scope="col">Evidence</th><th scope="col">Gaps</th><th scope="col">Unknown</th>{#if commits}<th scope="col">Commits</th>{/if}</tr></thead>
               <tbody>
                 {#each data.days as day, index (day.date)}
                   <tr><th scope="row">{shortDate(day.date)}</th>
@@ -145,7 +154,7 @@
                     <td>{duration(day.totals.focus_ms - day.metrics.active_ms)}</td><td>{duration(day.totals.focus_ms)}</td>
                     <td>{day.range.start_ms >= now ? "—" : duration(day.evidence.observed_ms)}</td>
                     <td>{duration(day.evidence.gap_ms)}{gapReasons(day).length ? ` (${gapReasons(day).join(", ")})` : ""}</td>
-                    <td>{duration(day.evidence.unknown_ms)}</td></tr>
+                    <td>{duration(day.evidence.unknown_ms)}</td>{#if commits}<td>{commits.get(day.date)?.count ?? 0}</td>{/if}</tr>
                 {/each}
               </tbody>
             </table>

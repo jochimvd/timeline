@@ -1,13 +1,16 @@
 <script lang="ts">
   import ChartTooltip from "./ChartTooltip.svelte";
+  import { commitCount, repositorySummary, type CommitDay } from "./commits";
   import { dateLabel, shortDate, weekday } from "./dates";
   import { duration, type Swatch } from "./format";
   import { dayState, gapReasons, type Subject } from "./trends";
   import type { DayFocusMetrics } from "./types";
   /** Recorded focus per day, stacked by subject's active focus with idle on top.
    *  Days without evidence are hatched rather than drawn as zero. */
-  let { days, subjects, swatch, now, onopen, onshift, onhome }: {
+  let { days, subjects, swatch, now, commits, onopen, onshift, onhome }: {
     days: DayFocusMetrics[]; subjects: Subject[]; swatch: (subject: Subject) => Swatch; now: number;
+    /** The user's commits per date, beneath the columns; absent without repositories. */
+    commits?: Map<string, CommitDay>;
     onopen: (date: string) => void; onshift: (delta: number) => void; onhome: () => void;
   } = $props();
   const HOUR = 3_600_000;
@@ -25,6 +28,9 @@
   const slot = $derived(days.length ? width / days.length : 0);
   const labelEvery = $derived(slot >= 30 ? 1 : 7);
   const capLabels = $derived(slot >= 56);
+  /** Counts fit beside their dot in wider columns; narrower ones show the dot. */
+  const commitLabels = $derived(slot >= 30);
+  const committed = (index: number) => commits?.get(days[index].date);
   let focusIndex = $state(-1);
   const tabIndex = $derived(focusIndex >= 0 && focusIndex < days.length ? focusIndex : Math.max(0, today));
   let hovered = $state<{ index: number; anchor: DOMRect } | null>(null);
@@ -34,6 +40,10 @@
     { key: "idle", name: "Idle", value: idle[index], fill: "", idle: true },
   ].filter(segment => segment.value > 0);
   function describe(index: number) {
+    const day = committed(index);
+    return describeFocus(index) + (day?.count ? `, ${commitCount(day.count)}` : "");
+  }
+  function describeFocus(index: number) {
     const day = days[index], state = states[index];
     if (state === "future") return `${shortDate(day.date)}: not yet begun`;
     if (state === "missing") return `${shortDate(day.date)}: no evidence${gapReasons(day).length ? ` (${gapReasons(day).join(", ")})` : ""}`;
@@ -67,6 +77,7 @@
     {/each}
     <li><span class="swatch idle-swatch"></span>Idle</li>
     {#if states.includes("missing")}<li><span class="swatch gap"></span>No evidence</li>{/if}
+    {#if commits}<li><span class="commit-key"></span>Your commits</li>{/if}
   </ul>
   <div class="chart-plot" style:--columns={days.length}>
     <div class="y-axis" aria-hidden="true">
@@ -97,6 +108,14 @@
         {/each}
       </div>
     </div>
+    {#if commits}
+      <div class="commit-row" id="commit-row" aria-hidden="true">
+        {#each days as day (day.date)}
+          {@const count = commits.get(day.date)?.count ?? 0}
+          <span>{#if count}<span class="commit-key"></span>{#if commitLabels}{count}{/if}{/if}</span>
+        {/each}
+      </div>
+    {/if}
     <div class="x-axis" aria-hidden="true">
       {#each days as day, index (day.date)}
         <span class:muted={states[index] === "future"} class:current={index === today}>
@@ -130,6 +149,10 @@
         </tbody>
       </table>
       <p class="muted">Evidence {duration(day.evidence.observed_ms)}{day.evidence.gap_ms ? ` · gaps ${duration(day.evidence.gap_ms)}${gapReasons(day).length ? ` (${gapReasons(day).join(", ")})` : ""}` : ""}{day.evidence.unknown_ms ? ` · unknown ${duration(day.evidence.unknown_ms)}` : ""}</p>
+    {/if}
+    {#if committed(hovered.index)?.count}
+      {@const day = committed(hovered.index)!}
+      <p class="tooltip-commit-line"><span class="commit-key"></span>{commitCount(day.count)} · {repositorySummary(day.commits)}</p>
     {/if}
     {#if state !== "future"}<p class="muted">Click to open the day.</p>{/if}
   </ChartTooltip>

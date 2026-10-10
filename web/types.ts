@@ -103,3 +103,31 @@ export type DayFocusMetrics = {
   evidence: DayEvidence; metrics: FocusMetrics;
 };
 export type FocusMetricsByDay = { resolved: { range: Range; timezone: string }; days: DayFocusMetrics[] };
+
+/** One of the user's git commits; see README "Git commits". */
+export type Commit = {
+  repository: string; hash: string; short_hash: string; subject: string; branch: string | null;
+  time_ms: number; timing: "reflog" | "committer_date";
+  kind: "commit" | "merge" | "cherry_pick" | "revert" | "patch";
+  /** How often it was amended; `first_ms` is when the original was made. */
+  amends: number; first_ms?: number;
+};
+export type RepositoryProblem = { repository: string; problem: string };
+export type CommitList = {
+  resolved: { range: Range; timezone: string };
+  /** Whether any git paths are configured. */
+  configured: boolean;
+  commits: Commit[];
+  days: { date: string; range: Range; commits: number }[];
+  repositories: number;
+  /** Repositories whose commits are missing because they could not be read. */
+  problems: RepositoryProblem[];
+  settings_problem: string | null;
+};
+export type RepositoryList = {
+  paths: string[]; authors: string[]; depth: number;
+  repositories: { name: string; path: string }[];
+  problems: RepositoryProblem[];
+  scanned_ms: number | null; directories: number; truncated: boolean;
+  settings_problem: string | null;
+};

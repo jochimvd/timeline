@@ -2,12 +2,16 @@
   import { query } from "./api";
   import FocusPatterns from "./FocusPatterns.svelte";
   import StatTile from "./StatTile.svelte";
-  import { applicationSwatch, captureTime, categorySwatch, clockRange, duration, swatchStyle, UNCATEGORIZED, type Swatch } from "./format";
+  import { byRepository, commitCount, repositoryLabel } from "./commits";
+  import { applicationSwatch, captureTime, categorySwatch, clockRange, duration, swatchStyle, time, UNCATEGORIZED, type Swatch } from "./format";
   import { plural } from "./metrics";
-  import type { CategoryList, CategoryRow, Coverage, FocusMetrics, FocusSubject, Overview, Range } from "./types";
-  let { rows, categories, totals, metrics, range, timezone, settingsPath, loading, onreveal }: {
-    rows: Coverage[]; categories: CategoryRow[]; totals?: Overview["totals"]; metrics?: FocusMetrics; range?: Range;
-    timezone: string; settingsPath: string | null; loading: boolean; onreveal: (range: Range) => void;
+  import type { CategoryList, CategoryRow, CommitList, Coverage, FocusMetrics, FocusSubject, Overview, Range } from "./types";
+  let { rows, categories, totals, metrics, commits, range, timezone, settingsPath, loading, onreveal, onselect }: {
+    rows: Coverage[]; categories: CategoryRow[]; totals?: Overview["totals"]; metrics?: FocusMetrics; commits: CommitList | null;
+    range?: Range; timezone: string; settingsPath: string | null; loading: boolean;
+    onreveal: (range: Range) => void;
+    /** Selects a moment, such as a commit, on the timeline. */
+    onselect: (ms: number) => void;
   } = $props();
   /** One ranked row: a name, optional context line, its focus share and mark color. */
   type Entry = { key: string; name: string; detail?: string; elapsed_ms: number; percent: number; swatch: Swatch };
@@ -35,6 +39,7 @@
   const subjectSwatch = (subject: FocusSubject) => subject.kind === "category"
     ? categorySwatch(categories.find(row => row.category === subject.name)) : applicationSwatch(subject.name);
   const longest = $derived(metrics?.longest_stretch ?? null);
+  const commitRepositories = $derived(commits ? byRepository(commits.commits).length : 0);
   const longShare = $derived(metrics && metrics.active_ms > 0 ? 100 * metrics.stretches.long.elapsed_ms / metrics.active_ms : 0);
 
   // Definitions load lazily: when the rules are opened, or to explain why none apply.
@@ -148,6 +153,24 @@
       <summary>Window titles <span class="muted">({titles.length})</span></summary>
       {@render ranking(titles, "titles")}
     </details>
+    {#if commits?.commits.length}
+      <details class="breakdown-details">
+        <summary>Commits <span class="muted">({commitCount(commits.commits.length)} in {plural(commitRepositories, "repository", "repositories")})</span></summary>
+        <ol class="commit-list" id="commit-list">
+          {#each commits.commits as commit (commit.repository + commit.hash)}
+            <li>
+              <button class="link-button" aria-label={`Show ${time(commit.time_ms, timezone)} on the timeline`}
+                onclick={() => onselect(commit.time_ms)}>{time(commit.time_ms, timezone)}</button>
+              <span class="commit-key" aria-hidden="true"></span>
+              <span class="commit-text">
+                <span class="commit-subject">{commit.subject}</span>
+                <small>{repositoryLabel(commit.repository)}{commit.branch ? ` · ${commit.branch}` : ""} · <code>{commit.short_hash}</code>{commit.kind === "commit" ? "" : ` · ${commit.kind.replace("_", "-")}`}{commit.amends ? ` · amended, first at ${time(commit.first_ms!, timezone)}` : ""}{commit.timing === "committer_date" ? " · committer date" : ""}</small>
+              </span>
+            </li>
+          {/each}
+        </ol>
+      </details>
+    {/if}
     {#if configured}
       <details class="breakdown-details" bind:open={rulesOpen}>
         <summary>Category rules <span class="muted">· first match wins</span></summary>

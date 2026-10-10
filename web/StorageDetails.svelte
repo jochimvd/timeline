@@ -29,7 +29,7 @@
   onDestroy(() => controller?.abort());
 </script>
 
-<details class="storage-details" ontoggle={toggle}>
+<details class="page-details storage-details" ontoggle={toggle}>
   <summary>Storage details</summary>
   <div class="storage-body" aria-busy={busy}>
     <dl>

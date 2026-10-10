@@ -3,7 +3,7 @@ import { query } from "./api";
 import { addDays } from "./dates";
 import { previousSpan, type Period } from "./routes";
 import type { Session } from "./session";
-import type { CategoryList, FocusMetricsByDay, Range } from "./types";
+import type { CategoryList, CommitList, FocusMetricsByDay, Range } from "./types";
 
 /** The previous period of equal length, cut where the current period's evidence
  *  ends when the current period is still in progress. */
@@ -16,17 +16,22 @@ export type PeriodState = {
   /** Loaded after `current`; null until then or without one. */
   comparison: Comparison | null;
   categories: CategoryList["categories"];
+  /** The user's commits in `period`, read after its focus; null until then,
+   *  without configured repositories, or when they could not be read. */
+  commits: CommitList | null;
+  /** Why commits could not be read. */
+  commitError: string;
   /** The time the displayed period was read, separating past from future days. */
   now: number;
   loading: boolean; comparing: boolean; message: string;
 };
 
-/** Week and month data: one `focus_metrics` scan for the period, then one for its
- *  comparison. Newer periods abort and supersede older requests; views only render. */
+/** Week and month data: one `focus_metrics` scan for the period, then its
+ *  commits and one scan for its comparison. Newer periods abort and supersede older requests; views only render. */
 export function createPeriodModel() {
   let state: PeriodState = {
     timezone: Intl.DateTimeFormat().resolvedOptions().timeZone, period: null, current: null, comparison: null,
-    categories: [], now: Date.now(), loading: false, comparing: false, message: "",
+    categories: [], commits: null, commitError: "", now: Date.now(), loading: false, comparing: false, message: "",
   };
   const store = writable(state);
   const patch = (values: Partial<PeriodState>) => { state = { ...state, ...values }; store.set(state); };
@@ -59,6 +64,16 @@ export function createPeriodModel() {
     const data = await query<FocusMetricsByDay>("focus_metrics", { range }, signal);
     return { first: span.first, last: addDays(span.first, today), partial: true, range, data };
   }
+  /** Commits are external evidence: without them the period still shows. */
+  async function readCommits(period: Period, signal: AbortSignal): Promise<Pick<PeriodState, "commits" | "commitError">> {
+    try {
+      const list = await query<CommitList>("commits", { dates: { first: period.first, last: period.last } }, signal);
+      return { commits: list.configured ? list : null, commitError: "" };
+    } catch (error) {
+      signal.throwIfAborted();
+      return { commits: null, commitError: error instanceof Error ? error.message : String(error) };
+    }
+  }
   async function load(period: Period, background = false) {
     const current = ++generation;
     abort.abort();
@@ -73,8 +88,12 @@ export function createPeriodModel() {
       if (current !== generation) return;
       const now = Date.now();
       const sameComparison = state.comparison && state.period?.first === period.first && state.current?.resolved.range.start_ms === data.resolved.range.start_ms;
+      const samePeriod = state.current?.resolved.range.start_ms === data.resolved.range.start_ms;
       patch({ current: data, categories: categories.categories, timezone: data.resolved.timezone, now, loading: false,
-        comparing: true, ...(sameComparison && background ? {} : { comparison: null }) });
+        comparing: true, ...(sameComparison && background ? {} : { comparison: null }), ...(samePeriod ? {} : { commits: null, commitError: "" }) });
+      const commits = await readCommits(period, signal);
+      if (current !== generation) return;
+      patch(commits);
       if (data.resolved.range.start_ms >= now) { patch({ comparing: false, comparison: null }); return; }
       const comparison = await compare(period, data, now, signal);
       if (current !== generation) return;

@@ -449,7 +449,10 @@ cargo clippy --all-targets --locked -- -D warnings
 ```
 
 Tests use real temporary SQLite databases, controlled recording events/clocks,
-synthetic Hyprland sockets, and child processes. The daemon process test removes
+synthetic Hyprland sockets, and child processes. Commit tests create real temporary
+git repositories (amends, cherry-picks, rebases, nested repositories, work trees,
+other authors, unreadable and broken repositories) with a global git configuration
+of their own, set before any test thread starts. The daemon process test removes
 desktop connection variables, so it never records the developer's real windows.
 It verifies durable pause after SIGKILL, singleton recording, and inspection.
 The ignored `live_capture` test requires two explicitly provisioned headless
@@ -490,6 +493,19 @@ hour by its application or category switches (following "Color by") on a fixed
 five-step scale, and the hover preview reports that hour's switches. Like the
 breakdown, metrics follow the loaded range.
 
+With [git paths](#git-commits) configured, a commit track marks the user's commits
+in the visible range; commits that would overlap at the current scale share a
+numbered marker, which separates when zoomed in. Hovering a marker lists its
+commits (subject, repository, branch, short hash and time) in the timeline
+preview; the track is one tab stop where arrow keys move between markers and focus
+shows the same details. Clicking a marker, or Enter, selects that moment. The
+focus summary lists the loaded range's commits, each selecting its moment. Commits
+are read with the range and checked again about once a minute. A track label
+names repositories that could not be read and opens the collapsed "Git
+repositories" details at the end of the page, which list the configured paths,
+the repositories found, their problems and a Rescan button; without paths it shows
+how to add them. Ticks show seconds only for windows under 20 minutes.
+
 Day, Week and Month switch views; the URL names the view and period
 (`?date=2026-10-07`, `?view=week&date=2026-10-05`, `?view=month&date=2026-10-01`),
 so it can be linked and survives reload, and Back returns from a day opened from a
@@ -508,7 +524,10 @@ shows no changes. Below are columns of active focus per day stacked by category
 top, each category's or application's active focus against the comparison period,
 small multiples of switches per active hour, longest stretch and long-stretch share
 by day, and an hour-of-day heatmap of active focus or switches, hatched where an
-hour has no evidence. Day columns, trend charts and heatmap cells show details on
+hour has no evidence. With git paths configured, the number of the user's commits
+stands beneath each day's column (a dot where columns are narrow) and in its
+tooltip, by repository, and in the daily table; a day without focus evidence can
+still show commits. Day columns, trend charts and heatmap cells show details on
 hover and keyboard focus; clicking one, or Enter, opens that day (a heatmap cell
 marks its hour). Arrow keys move between days or hours, Shift+arrows change the
 period, and Home returns to the current one. Tables under each chart carry every
@@ -622,7 +641,9 @@ cargo test --locked
 (`web/session.ts`). Week and month views (`PeriodView.svelte`, with
 `DailyFocusChart`, `SubjectComparison`, `TrendChart` and `HourHeatmap`) render
 state from `web/period.ts`, which loads a period and its comparison, and
-`web/trends.ts`, which derives summaries, stacks, changes and heatmap cells. The day view (`DayView.svelte`)
+`web/trends.ts`, which derives summaries, stacks, changes and heatmap cells.
+`web/commits.ts` clusters commit markers and groups commits by day and repository;
+`RepositoryDetails.svelte` shows where commits come from. The day view (`DayView.svelte`)
 combines `Timeline.svelte`, `EvidenceViewer.svelte` and `Breakdown.svelte` (with
 `FocusPatterns.svelte`); stat tiles share `StatTile.svelte` and the remembered
 "Color by" choice lives in `web/preferences.ts`. `web/metrics.ts` holds the
@@ -694,9 +715,11 @@ The script prints aggregate resource measurements without credentials, activity
 titles or screenshot contents. See the
 [viewer performance measurements](docs/acceptance/2026-09-22-viewer.md).
 
-To look at the UI with three weeks of varied synthetic focus and demo categories, run
+To look at the UI with three weeks of varied synthetic focus, demo categories and
+commits in two temporary repositories, run
 `cargo run --example web_fixture -- --demo 127.0.0.1:47850` and open the printed
-URL. It uses temporary history and settings, never the desktop or retained history.
+URL. It uses temporary history, settings and repositories, never the desktop,
+retained history or the developer's git configuration.
 
 Browser tests verify that the bundled JavaScript matches Svelte/TypeScript and exercise
 the real HTTP/query/history stack in headless Chromium with two synthetic monitor
