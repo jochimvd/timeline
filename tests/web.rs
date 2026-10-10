@@ -1,9 +1,6 @@
 mod common;
-use axum::{
-    Router,
-    body::{Body, to_bytes},
-    http::{Request, StatusCode},
-};
+use axum::http::StatusCode;
+use common::web::{HOST, browser, call, rpc, session, tool};
 use serde_json::{Value, json};
 use std::os::unix::fs::PermissionsExt;
 use timeline::{
@@ -12,98 +9,7 @@ use timeline::{
     recording::{Input, Recorder, Stamp, Window},
     web::{Web, secret},
 };
-use tower::ServiceExt;
 
-const HOST: &str = "127.0.0.1:47831";
-async fn call(
-    app: &Router,
-    path: &str,
-    value: Option<Value>,
-    headers: &[(&str, &str)],
-) -> (StatusCode, axum::http::HeaderMap, Vec<u8>) {
-    let mut request = Request::builder()
-        .method(if value.is_some() { "POST" } else { "GET" })
-        .uri(path)
-        .header("host", HOST);
-    for (k, v) in headers {
-        request = request.header(*k, *v);
-    }
-    if value.is_some() {
-        request = request.header("content-type", "application/json");
-    }
-    let response = app
-        .clone()
-        .oneshot(
-            request
-                .body(Body::from(value.map(|v| v.to_string()).unwrap_or_default()))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    let status = response.status();
-    let headers = response.headers().clone();
-    let body = to_bytes(response.into_body(), 40 * 1024 * 1024)
-        .await
-        .unwrap()
-        .to_vec();
-    (status, headers, body)
-}
-async fn session(app: &Router, web: &Web) -> String {
-    let url = web.launch_url().unwrap();
-    let (status, headers, _) = call(
-        app,
-        "/bootstrap",
-        Some(json!({"token":url.split('#').nth(1).unwrap()})),
-        &[
-            ("origin", "http://127.0.0.1:47831"),
-            ("x-timeline-request", "1"),
-        ],
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    let cookie = headers["set-cookie"].to_str().unwrap();
-    assert!(cookie.contains("HttpOnly") && cookie.contains("SameSite=Strict"));
-    cookie.split(';').next().unwrap().into()
-}
-async fn browser(app: &Router, cookie: &str, operation: &str, args: Value) -> (StatusCode, Value) {
-    let (status, _, body) = call(
-        app,
-        &format!("/api/query/{operation}"),
-        Some(args),
-        &[
-            ("cookie", cookie),
-            ("origin", "http://127.0.0.1:47831"),
-            ("x-timeline-request", "1"),
-        ],
-    )
-    .await;
-    (status, serde_json::from_slice(&body).unwrap())
-}
-async fn rpc(app: &Router, token: &str, method: &str, params: Value) -> (StatusCode, Value) {
-    let (status, _, body) = call(
-        app,
-        "/mcp",
-        Some(json!({"jsonrpc":"2.0","id":1,"method":method,"params":params})),
-        &[
-            ("authorization", token),
-            ("accept", "application/json, text/event-stream"),
-            ("mcp-protocol-version", "2025-11-25"),
-        ],
-    )
-    .await;
-    (status, serde_json::from_slice(&body).unwrap())
-}
-async fn tool(app: &Router, token: &str, name: &str, args: Value) -> Value {
-    rpc(
-        app,
-        token,
-        "tools/call",
-        json!({"name":name,"arguments":args}),
-    )
-    .await
-    .1["result"]
-        .clone()
-}
 fn stamp(ms: i64) -> Stamp {
     Stamp {
         unix_ms: ms,
@@ -303,7 +209,7 @@ async fn authentication_bootstrap_origin_host_and_read_only_mcp() {
     let init = rpc(&app,&bearer,"initialize",json!({"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"test","version":"1"}})).await.1;
     assert_eq!(init["result"]["protocolVersion"], "2025-11-25");
     let list = rpc(&app, &bearer, "tools/list", json!({})).await.1;
-    assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 6);
+    assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 10);
     assert!(
         list["result"]["tools"]
             .as_array()
@@ -411,6 +317,149 @@ async fn adapters_share_paged_history_gaps_empty_days_and_retention_invalidation
         .await["isError"],
         true
     );
+}
+#[tokio::test]
+async fn browser_and_mcp_share_configured_categories_and_reload_edits() {
+    let dir = tempfile::tempdir().unwrap();
+    fixture(dir.path());
+    let config = tempfile::tempdir().unwrap();
+    let settings = config.path().join("config.toml");
+    std::fs::write(
+        &settings,
+        "[[categories]]\nname = 'Coding'\n[[categories.rules]]\napplication = 'editor'\n",
+    )
+    .unwrap();
+    let web = Web::configured(dir.path(), HOST, Some(settings.clone())).unwrap();
+    let app = web.router();
+    let cookie = session(&app, &web).await;
+    let bearer = format!("Bearer {}", secret(dir.path()).unwrap());
+    let args = json!({"range":{"start_ms":0,"end_ms":10000},"limit":500});
+    let overview = tool(&app, &bearer, "overview", args.clone()).await["structuredContent"].clone();
+    assert_eq!(
+        overview,
+        browser(&app, &cookie, "overview", args.clone()).await.1
+    );
+    let first = &overview["breakdown"]["items"][0];
+    assert_eq!(
+        (
+            &first["kind"],
+            &first["category"],
+            &first["palette"],
+            &first["elapsed_ms"]
+        ),
+        (
+            &json!("category"),
+            &json!("Coding"),
+            &json!(1),
+            &json!(5000)
+        )
+    );
+    let blocks = tool(&app, &bearer, "blocks", args.clone()).await["structuredContent"].clone();
+    assert_eq!(blocks["items"][0]["category"], "Coding");
+    let list = tool(&app, &bearer, "categories", json!({})).await["structuredContent"].clone();
+    assert_eq!(
+        list,
+        browser(&app, &cookie, "categories", json!({})).await.1
+    );
+    assert_eq!(list["categories"][0]["rules"][0]["application"], "editor");
+    assert!(list["problem"].is_null());
+
+    // An invalid edit is reported and ignored; analysis falls back to uncategorized.
+    std::fs::write(
+        &settings,
+        "[[categories]]\nname = 'Coding'\ncolor = 'green'\n",
+    )
+    .unwrap();
+    let list = tool(&app, &bearer, "categories", json!({})).await["structuredContent"].clone();
+    assert!(list["problem"].as_str().unwrap().contains("color"));
+    assert_eq!(list["categories"], json!([]));
+    let blocks = tool(&app, &bearer, "blocks", args).await["structuredContent"].clone();
+    assert!(blocks["items"][0]["category"].is_null());
+}
+#[tokio::test]
+async fn browser_and_mcp_share_focus_metrics_per_activity_day() {
+    let dir = tempfile::tempdir().unwrap();
+    fixture(dir.path());
+    let web = Web::new(dir.path(), HOST).unwrap();
+    let app = web.router();
+    let cookie = session(&app, &web).await;
+    let bearer = format!("Bearer {}", secret(dir.path()).unwrap());
+    let args = json!({"range":{"start_ms":0,"end_ms":10000}});
+    let days =
+        tool(&app, &bearer, "focus_metrics", args.clone()).await["structuredContent"].clone();
+    assert_eq!(days, browser(&app, &cookie, "focus_metrics", args).await.1);
+    assert_eq!(days["days"].as_array().unwrap().len(), 1);
+    let day = &days["days"][0];
+    assert_eq!(day["metrics"]["active_ms"], day["totals"]["focus_ms"]);
+    assert_eq!(day["metrics"]["application_switches"], 0);
+    assert!(day["metrics"]["category_switches"].is_null());
+    assert_eq!(
+        day["metrics"]["longest_stretch"]["subject"],
+        json!({"kind":"application","name":"editor"})
+    );
+    let overview = tool(
+        &app,
+        &bearer,
+        "overview",
+        json!({"range":day["range"].clone(),"limit":1}),
+    )
+    .await["structuredContent"]
+        .clone();
+    assert_eq!(overview["metrics"], day["metrics"]);
+    let invalid = tool(
+        &app,
+        &bearer,
+        "focus_metrics",
+        json!({"range":{"start_ms":0,"end_ms":32 * 86_400_000_i64}}),
+    )
+    .await;
+    assert_eq!(invalid["isError"], true);
+
+    // Consecutive activity dates, as for a week, select whole days.
+    let args = json!({"dates":{"first":"1969-12-31","last":"1970-01-01"}});
+    let span =
+        tool(&app, &bearer, "focus_metrics", args.clone()).await["structuredContent"].clone();
+    assert_eq!(span, browser(&app, &cookie, "focus_metrics", args).await.1);
+    let days = span["days"].as_array().unwrap();
+    assert_eq!(days.len(), 2);
+    let day = days
+        .iter()
+        .find(|day| day["evidence"]["observed_ms"].as_i64() > Some(0))
+        .unwrap();
+    assert_eq!(day["applications"][0]["application"], "editor");
+    assert_eq!(
+        day["applications"][0]["active_ms"],
+        day["metrics"]["active_ms"]
+    );
+    assert_eq!(day["categories"], json!([]), "no categories configured");
+    let width =
+        day["range"]["end_ms"].as_i64().unwrap() - day["range"]["start_ms"].as_i64().unwrap();
+    let evidence = &day["evidence"];
+    assert_eq!(
+        ["observed_ms", "gap_ms", "unknown_ms"]
+            .map(|field| evidence[field].as_i64().unwrap())
+            .iter()
+            .sum::<i64>(),
+        width
+    );
+    for dates in [
+        json!({"first":"1970-01-01","last":"1970-02-01"}),
+        json!({"first":"1970-01-01"}),
+    ] {
+        let response = tool(&app, &bearer, "focus_metrics", json!({ "dates": dates })).await;
+        assert!(
+            response.is_null() || response["isError"] == true,
+            "{response}"
+        );
+    }
+    let both = tool(
+        &app,
+        &bearer,
+        "focus_metrics",
+        json!({"date":"1970-01-01","dates":{"first":"1970-01-01","last":"1970-01-01"}}),
+    )
+    .await;
+    assert_eq!(both["isError"], true, "one selection at a time");
 }
 #[tokio::test]
 async fn selected_images_missing_files_expiry_and_shared_busy_limits() {

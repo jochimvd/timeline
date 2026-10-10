@@ -1,7 +1,9 @@
 import { writable, readonly } from "svelte/store";
-import { request, query, pages } from "./api";
+import { query, pages } from "./api";
+import type { Session } from "./session";
+import { activityDate as activityDateIn, addDays } from "./dates";
 import { createImageLoader, createImagePool, type ImageFrame } from "./images";
-import type { Range, Block, Coverage, Overview, Shot, Evidence, OverviewUpdates } from "./types";
+import type { Range, Block, CategoryRow, CommitList, Coverage, FocusMetrics, Overview, Shot, Evidence, OverviewUpdates } from "./types";
 
 export const zoomLevels: { value: string; label: string; durationMs?: number }[] = [
   { value: "1", label: "Full day" }, { value: "2", label: "12 hours" },
@@ -14,32 +16,34 @@ export const zoomLevels: { value: string; label: string; durationMs?: number }[]
 ];
 
 export type View = {
-  date: string; timezone: string; zoom: string; layout: string; fitWidth?: number; navigationBusy: boolean;
+  date: string; timezone: string; settingsPath: string | null; zoom: string; layout: string; fitWidth?: number; navigationBusy: boolean;
   day?: Range; visible?: Range; loadedRange?: Range; selected: number;
   dayLoading: boolean; rangeLoading: boolean; evidenceLoading: boolean;
   blocks: Block[]; rows: Coverage[]; totals?: Overview["totals"];
-  focus: Coverage[]; shots: Shot[]; frames: ImageFrame[] | null;
+  /** Context switches and focus stretches of the loaded range. */
+  metrics?: FocusMetrics;
+  /** A range the user asked to see on the timeline, such as the longest stretch. */
+  highlight: Range | null;
+  /** Configured categories in tree order, then uncategorized focus. */
+  categories: CategoryRow[];
+  /** The user's git commits in the loaded range, swapped together with its rows. */
+  commits: CommitList | null;
+  /** Why commits could not be read; the timeline remains usable. */
+  commitError: string;
+  focus: Coverage[]; shots: Shot[]; frames: ImageFrame[] | null; shotsExpired: boolean;
   evidenceTime: number | null;
-  hoverEvidence: { time: number | null; focus: Coverage[]; frames: ImageFrame[] | null; error: string; loading: boolean };
+  hoverEvidence: { time: number | null; focus: Coverage[]; frames: ImageFrame[] | null; expired: boolean; error: string; loading: boolean };
   evidenceError: string; message: string;
-  recording: string; paused: boolean; recordingBusy: boolean;
 };
-type Status = {
-  recording: { manual_paused: boolean; locked: boolean; connected: boolean; screenshot_pressure?: boolean };
-  desktop_error?: string; screenshot_error?: string;
-};
-// Intl formatter construction is expensive; activity dates share one per timezone.
-const activityFormatters = new Map<string, Intl.DateTimeFormat>();
 
 /** All asynchronous transitions publish complete view state; views never manage requests. */
 export function createTimelineApp() {
   let view: View = {
-    date: "", timezone: Intl.DateTimeFormat().resolvedOptions().timeZone, zoom: "1", layout: "grid",
-    navigationBusy: false, selected: 0, dayLoading: true, rangeLoading: false,
-    evidenceLoading: false, blocks: [], rows: [], focus: [], shots: [], frames: null,
-    hoverEvidence: { time: null, focus: [], frames: null, error: "", loading: false },
+    date: "", timezone: Intl.DateTimeFormat().resolvedOptions().timeZone, settingsPath: null, zoom: "1", layout: "grid",
+    navigationBusy: false, selected: 0, dayLoading: true, rangeLoading: false, highlight: null,
+    evidenceLoading: false, blocks: [], rows: [], categories: [], commits: null, commitError: "", focus: [], shots: [], frames: null, shotsExpired: false,
+    hoverEvidence: { time: null, focus: [], frames: null, expired: false, error: "", loading: false },
     evidenceTime: null, evidenceError: "", message: "",
-    recording: "Connecting…", paused: false, recordingBusy: true,
   };
   const store = writable(view);
   const patch = (values: Partial<View>) => { view = { ...view, ...values }; store.set(view); };
@@ -52,8 +56,10 @@ export function createTimelineApp() {
   let rangeGeneration = 0, selectionGeneration = 0;
   let rangeAbort = new AbortController(), selectionAbort = new AbortController();
   const lifetime = new AbortController();
+  /** Whether the day view is shown; hidden views do not poll for live updates. */
+  let active = true, attached = false;
   let navigationAbort = new AbortController();
-  let statusTimer: ReturnType<typeof setInterval> | undefined;
+  let refreshTimer: ReturnType<typeof setInterval> | undefined;
   let hoverTimer: ReturnType<typeof setTimeout> | undefined;
   let rangeTimer: ReturnType<typeof setTimeout> | undefined;
   let hoverTime = 0;
@@ -64,6 +70,7 @@ export function createTimelineApp() {
   let interactionGeneration = 0;
   let rawRows: Coverage[] = [];
   let refreshing = false;
+  let commitsRead = 0;
   // Only calendar metadata is cached; activity still comes from a fresh snapshot.
   const resolvedDays = new Map<string, Overview["resolved"]>();
 
@@ -93,7 +100,8 @@ export function createTimelineApp() {
     patch({ visible: { start_ms: start, end_ms: start + width } });
   }
 
-  function publishRows(raw: Coverage[], totals: Overview["totals"], token: string, range: Range, transition: Partial<View> = {}) {
+  type Summary = Pick<Overview, "totals" | "metrics">;
+  function publishRows(raw: Coverage[], { totals, metrics }: Summary, token: string, range: Range, transition: Partial<View> = {}) {
     rawRows = raw;
     revision = token;
     const rows = raw
@@ -106,24 +114,42 @@ export function createTimelineApp() {
       if (row.focus?.kind !== "focus") { previousCoverage = undefined; continue; }
       const window = row.focus.window!;
       const group = { application: window.application, title: row.mixed ? "Mixed activity · zoom in for detail" : window.title };
+      const category = row.focus.category ?? null;
       const previous = blocks.at(-1);
       if (previous && previousCoverage?.segment === row.segment && previousCoverage?.recording_boundary === row.recording_boundary
-        && previous.range.end_ms === row.range.start_ms && previous.mixed === row.mixed
+        && previous.range.end_ms === row.range.start_ms && previous.mixed === row.mixed && previous.category === category
         && previous.group.application === group.application && previous.group.title === group.title) {
         previous.range.end_ms = row.range.end_ms;
-      } else blocks.push({ id: "display:" + row.range.start_ms + ":" + blocks.length, range: { ...row.range }, group, mixed: row.mixed, idle_ms: 0 });
+      } else blocks.push({ id: "display:" + row.range.start_ms + ":" + blocks.length, range: { ...row.range }, group, category, mixed: row.mixed, idle_ms: 0 });
       previousCoverage = row;
     }
-    patch({ ...transition, rows, blocks, totals, loadedRange: range, rangeLoading: false,
+    // In tree order, uncategorized last; views rank them as they need.
+    const categories = rows.filter(row => row.kind === "category") as CategoryRow[];
+    patch({ ...transition, rows, blocks, categories, totals, metrics, loadedRange: range, rangeLoading: false,
       message: blocks.length ? "" : "No recorded focus in this range. Coverage and screenshots may differ." });
   }
+  /** Commits are external evidence: a failure leaves the timeline usable and says why. */
+  async function readCommits(range: Range, signal: AbortSignal): Promise<Pick<View, "commits" | "commitError">> {
+    commitsRead = Date.now();
+    try {
+      const commits = await query<CommitList>("commits", { range }, signal);
+      return { commits, commitError: "" };
+    } catch (error) {
+      signal.throwIfAborted();
+      return { commits: null, commitError: error instanceof Error ? error.message : String(error) };
+    }
+  }
+  /** One complete range: overview rows, then commits, sequentially so a range
+   *  load occupies at most one query admission slot. */
   async function readRange(range: Range, signal: AbortSignal) {
     const display_points = displayPoints;
     const overview = await query<Overview>("overview", { range, limit: 500, display_points }, signal);
     signal.throwIfAborted();
     const raw = await pages<Coverage>("overview", { range, display_points }, signal, overview);
     signal.throwIfAborted();
-    return { overview, raw };
+    const commits = await readCommits(range, signal);
+    signal.throwIfAborted();
+    return { overview, raw, commits };
   }
   async function loadRange(background = false) {
     if (!view.visible) return;
@@ -136,15 +162,15 @@ export function createTimelineApp() {
     // Retain the old rows and images during a range change; Svelte repositions them.
     patch({ rangeLoading: true });
     try {
-      const { overview, raw } = await readRange(range, signal);
+      const { overview, raw, commits } = await readRange(range, signal);
       if (generation !== rangeGeneration) return;
-      publishRows(raw, overview.totals, overview.revision, range);
+      publishRows(raw, overview, overview.revision, range, commits);
     } catch (error) {
       if (generation === rangeGeneration) { patch({ rangeLoading: false }); failure(error); }
     }
   }
   async function refresh() {
-    if (disposed || document.hidden || !view.visible || view.dayLoading || view.rangeLoading || refreshing || !revision) return;
+    if (disposed || !active || document.hidden || !view.visible || view.dayLoading || view.rangeLoading || refreshing || !revision) return;
     refreshing = true;
     const generation = rangeGeneration, signal = rangeAbort.signal;
     const args = { range: { ...view.visible }, display_points: displayPoints, since: revision, limit: 500 };
@@ -171,9 +197,15 @@ export function createTimelineApp() {
         }
         const raw = [...rows.values()].sort((a, b) => a.kind.localeCompare(b.kind)
           || (a.range?.start_ms ?? 0) - (b.range?.start_ms ?? 0) || (a.segment ?? 0) - (b.segment ?? 0));
-        publishRows(raw, update.totals ?? view.totals!, update.revision, args.range);
+        publishRows(raw, { totals: update.totals ?? view.totals!, metrics: update.metrics ?? view.metrics! },
+          update.revision, args.range);
         if (hoverActive && !hoverPending && hoverTimer === undefined) hoverTimer = setTimeout(flushHover, 100);
       } else revision = update.revision;
+      // New commits do not change the overview; check them about once a minute.
+      if (Date.now() - commitsRead >= 60_000) {
+        const commits = await readCommits(args.range, signal);
+        if (generation === rangeGeneration) patch(commits);
+      }
     } catch (error) {
       if (generation === rangeGeneration && !signal.aborted) {
         if (error instanceof Error && error.message === "cursor_invalidated") await loadRange(true);
@@ -199,7 +231,7 @@ export function createTimelineApp() {
     // replacement. A drag has already moved visible; explicit date navigation
     // commits the new scale and rows together, so labels never jump ahead.
     patch({ date, dayLoading: true, rangeLoading: true,
-      evidenceLoading: false });
+      evidenceLoading: false, highlight: null });
     try {
       let resolved = resolvedDays.get(date);
       if (!resolved) {
@@ -215,10 +247,10 @@ export function createTimelineApp() {
       const range = { start_ms: start, end_ms: start + width };
       // Resolve boundaries without scanning a full day whose overview would be
       // discarded whenever the dragged range straddles two activity days.
-      const { overview, raw } = await readRange(range, signal);
+      const { overview, raw, commits } = await readRange(range, signal);
       if (generation !== rangeGeneration) return;
       loadedDate = date;
-      publishRows(raw, overview.totals, overview.revision, range, {
+      publishRows(raw, overview, overview.revision, range, { ...commits,
         day, timezone: resolved.timezone, visible: range, zoom, dayLoading: false,
         ...(center === undefined ? { fitWidth: undefined } : {}),
         ...(view.frames === null ? { selected: selected ?? range.start_ms } : {}),
@@ -245,7 +277,7 @@ export function createTimelineApp() {
       const frames = unchanged ? view.frames! : await images.load(evidence.screenshots, view.layout, signal);
       if (generation !== selectionGeneration) return;
       displayedLayout = view.layout;
-      patch({ shots: evidence.screenshots, focus: evidence.focus, frames, evidenceTime: ms, evidenceError: "" });
+      patch({ shots: evidence.screenshots, shotsExpired: evidence.screenshots_expired, focus: evidence.focus, frames, evidenceTime: ms, evidenceError: "" });
     } catch (error) {
       if (generation === selectionGeneration) {
         patch({ evidenceError: "Could not load the selected moment." + (view.frames !== null ? " Previous evidence remains displayed." : "") });
@@ -266,11 +298,11 @@ export function createTimelineApp() {
       const evidence = await query<Evidence>("selection", { selected_ms: ms }, signal, generation, "hover");
       const frames = await hoverImages.load(evidence.screenshots, "grid", signal);
       if (generation === hoverGeneration && hoverActive)
-        patch({ hoverEvidence: { time: ms, focus: evidence.focus, frames, error: "", loading: false } });
+        patch({ hoverEvidence: { time: ms, focus: evidence.focus, frames, expired: evidence.screenshots_expired, error: "", loading: false } });
     } catch (error) {
       if (!signal.aborted && generation === hoverGeneration) {
         hoverImages.clear();
-        patch({ hoverEvidence: { time: ms, focus: [], frames: [], error: "Preview unavailable.", loading: false } });
+        patch({ hoverEvidence: { time: ms, focus: [], frames: [], expired: false, error: "Preview unavailable.", loading: false } });
       }
     } finally {
       if (generation === hoverGeneration) {
@@ -341,19 +373,7 @@ export function createTimelineApp() {
     setVisible((start_ms + end_ms) / 2 + direction * (end_ms - start_ms) / 2);
     settleRange();
   }
-  function activityDate(ms: number) {
-    let formatter = activityFormatters.get(view.timezone);
-    if (!formatter) {
-      formatter = new Intl.DateTimeFormat("en-CA", { timeZone: view.timezone,
-        year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", hourCycle: "h23" });
-      activityFormatters.set(view.timezone, formatter);
-    }
-    const parts = formatter.formatToParts(ms);
-    const part = (type: string) => parts.find(part => part.type === type)!.value;
-    const date = new Date(`${part("year")}-${part("month")}-${part("day")}T12:00:00Z`);
-    if (Number(part("hour")) < 4) date.setUTCDate(date.getUTCDate() - 1);
-    return date.toISOString().slice(0, 10);
-  }
+  const activityDate = (ms: number) => activityDateIn(ms, view.timezone);
   function settleRange() {
     if (!view.visible) return;
     const center = (view.visible.start_ms + view.visible.end_ms) / 2;
@@ -368,6 +388,22 @@ export function createTimelineApp() {
       void loadRange();
     }
     await select(ms);
+  }
+  /** Marks a range on the timeline, brings it into view and selects its start. */
+  async function reveal(range: Range) {
+    const date = activityDate(range.start_ms);
+    if (date !== view.date) {
+      // A dragged range can straddle days; loading the other day clears marks.
+      await loadDay(date, (range.start_ms + range.end_ms) / 2, range.start_ms);
+      if (view.date === date) patch({ highlight: range });
+      return;
+    }
+    patch({ highlight: range });
+    if (view.visible && (range.start_ms < view.visible.start_ms || range.end_ms > view.visible.end_ms)) {
+      setVisible((range.start_ms + range.end_ms) / 2);
+      void loadRange();
+    }
+    await select(range.start_ms);
   }
   async function jumpNow() {
     const ms = Date.now();
@@ -410,11 +446,7 @@ export function createTimelineApp() {
     } catch (error) { failure(error); }
     finally { if (!signal.aborted) patch({ navigationBusy: false }); }
   }
-  function shiftDate(delta: number) {
-    const date = new Date(view.date + "T12:00:00Z");
-    date.setUTCDate(date.getUTCDate() + delta);
-    void loadDay(date.toISOString().slice(0, 10));
-  }
+  function shiftDate(delta: number) { void loadDay(addDays(view.date, delta)); }
   async function layout(value: string) {
     patch({ layout: value });
     // Reselect if a query is pending so layout cannot cancel missing evidence.
@@ -431,51 +463,35 @@ export function createTimelineApp() {
     } catch (error) { if (generation === selectionGeneration) failure(error); }
     finally { if (generation === selectionGeneration) patch({ evidenceLoading: false }); }
   }
-  async function status() {
-    try {
-      const s = await request<Status>("/api/status", undefined, lifetime.signal);
-      if (disposed) return;
-      let recording = s.recording.manual_paused ? "Recording paused" : s.recording.locked
-        ? "Screen locked" : !s.recording.connected ? "Desktop disconnected" : "Recording";
-      if (s.desktop_error || s.screenshot_error || s.recording.screenshot_pressure) recording += " · recording degraded";
-      patch({ recording, paused: s.recording.manual_paused, recordingBusy: false });
-    } catch {
-      if (!disposed) patch({ recording: "Recording status unavailable", recordingBusy: true });
-    }
+  /** Takes the session's timezone and starts live updates, once. */
+  function attach(session: Session) {
+    if (attached) return;
+    attached = true;
+    patch({ timezone: session.timezone, settingsPath: session.settingsPath });
+    refreshTimer = setInterval(() => void refresh(), 5000);
+    document.addEventListener("visibilitychange", becameVisible);
+    window.addEventListener("focus", becameVisible);
   }
-  async function toggleRecording() {
-    patch({ recordingBusy: true });
-    try { await request("/api/recording/" + (view.paused ? "resume" : "pause"), {}, lifetime.signal); }
-    catch (error) { failure(error); }
-    await status();
-  }
-  async function start() {
-    const token = location.hash.slice(1);
-    history.replaceState(null, "", "/");
+  /** Opens the day view on `date`, or on the newest capture's activity day. */
+  async function start(session: Session, date?: string) {
+    attach(session);
     try {
-      if (token) await request("/bootstrap", { token }, lifetime.signal);
-      const config = await request<{ timezone: string }>("/api/config", undefined, lifetime.signal);
-      if (disposed) return;
-      patch({ timezone: config.timezone });
+      if (date) { await loadDay(date); return; }
       // Find the newest available capture across activity days, including when
       // recording is paused. Explicit navigation during startup takes priority.
-      if (!view.date) {
-        const latest = await query<number | null>("adjacent_screenshot", {
-          selected_ms: Date.now() + 1, direction: -1,
-        }, lifetime.signal);
-        if (disposed) return;
-        if (!view.date) {
-          if (latest === null) await loadDay(activityDate(Date.now()));
-          else await loadDay(activityDate(latest), undefined, latest);
-        }
-      }
-      await status();
-      if (!disposed) {
-        statusTimer = setInterval(() => { void status(); void refresh(); }, 5000);
-        document.addEventListener("visibilitychange", becameVisible);
-        window.addEventListener("focus", becameVisible);
-      }
+      const latest = await query<number | null>("adjacent_screenshot", {
+        selected_ms: Date.now() + 1, direction: -1,
+      }, lifetime.signal);
+      if (disposed || view.date) return;
+      if (latest === null) await loadDay(activityDate(Date.now()));
+      else await loadDay(activityDate(latest), undefined, latest);
     } catch (error) { failure(error); }
+  }
+  /** Shows or hides the day view; hiding stops hover work and live polling. */
+  function setActive(value: boolean) {
+    active = value;
+    if (!value) leave();
+    else void refresh();
   }
   function dispose() {
     disposed = true;
@@ -485,13 +501,13 @@ export function createTimelineApp() {
     leave();
     lifetime.abort();
     navigationAbort.abort();
-    clearInterval(statusTimer);
+    clearInterval(refreshTimer);
     cancelRangeTimer();
     document.removeEventListener("visibilitychange", becameVisible);
     window.removeEventListener("focus", becameVisible);
     images.clear();
     hoverImages.clear();
   }
-  return { state: readonly(store), start, dispose, loadDay, select, hover, leave, zoom, pan, panTo, setWidth, shiftDate, jumpNow, fitActivity, stepScreenshot, stepZoom, navigateTo, layout, toggleRecording };
+  return { state: readonly(store), start, dispose, loadDay, select, hover, leave, zoom, pan, panTo, setWidth, shiftDate, jumpNow, reveal, fitActivity, stepScreenshot, stepZoom, navigateTo, layout, attach, setActive };
 }
 export type TimelineApp = ReturnType<typeof createTimelineApp>;

@@ -28,3 +28,22 @@ pub fn payload_files(directory: &std::path::Path) -> Vec<std::path::PathBuf> {
         .filter(|path| path.extension().is_some_and(|e| e == "bin" || e == "part"))
         .collect()
 }
+
+pub mod git;
+pub mod web;
+
+/// Isolates git from the developer's configuration before the test harness
+/// starts any thread.
+#[macro_export]
+macro_rules! isolate_git {
+    () => {
+        #[used]
+        #[unsafe(link_section = ".init_array")]
+        static ISOLATE_GIT: extern "C" fn() = {
+            extern "C" fn isolate() {
+                common::git::isolate();
+            }
+            isolate
+        };
+    };
+}

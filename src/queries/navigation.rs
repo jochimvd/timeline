@@ -53,10 +53,19 @@ impl Queries {
             screenshots.push(selected);
             Ok(())
         })?;
+        // Once retention has removed any screenshot, time before the oldest
+        // retained capture has lost its screenshots.
+        let (expired, oldest): (bool, Option<i64>) = self.history.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM state WHERE key='screenshots_expired_through'),
+                (SELECT min(unix_ms) FROM screenshots)",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
         Ok(CursorEvidence {
             selected_ms,
             focus,
             screenshots,
+            screenshots_expired: expired && oldest.is_none_or(|oldest| selected_ms < oldest),
         })
     }
 

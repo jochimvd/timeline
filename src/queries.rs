@@ -6,7 +6,7 @@ use crate::{
     evidence::{Evidence, FocusState, StateChange},
     history::{History, ImageRead, Screenshot, ScreenshotSample},
     recording::Window,
-    titles::TitleRules,
+    settings::Settings,
 };
 use anyhow::{Result, bail};
 use chrono::{NaiveDate, TimeZone};
@@ -24,18 +24,27 @@ use std::{
     },
 };
 
+mod commits;
 mod coverage;
 mod display;
 mod images;
+mod metrics;
 mod navigation;
 mod overview;
 mod paging;
 mod scan;
 mod segments;
 mod updates;
+pub use commits::{CommitDay, CommitList, RepositoryList};
 use coverage::is_boundary;
 pub use display::{DisplayFocus, DisplayImage};
 use images::ImageContext;
+pub use metrics::{
+    ApplicationFocus, BRIEF_INTERRUPTION_MS, CategoryFocus, DayEvidence, DayFocusMetrics,
+    EvidenceInterval, EvidenceKind, FocusMetrics, FocusMetricsByDay, FocusStretch, FocusSubject,
+    HourlyFocus, LONG_STRETCH_MS, MAX_INTERRUPTED_PERCENT, MEDIUM_STRETCH_MS, StretchBucket,
+    StretchDistribution,
+};
 pub use navigation::ActivityBounds;
 use overview::cached_overview;
 use paging::{Cursor, Pager, decode_cursor, encode_cursor};
@@ -45,6 +54,8 @@ use segments::{Plan, Run, Scope};
 pub use updates::{OverviewChange, OverviewUpdates};
 
 const HOUR: i64 = 3_600_000;
+/// Analysis ranges: overviews and focus metrics.
+const MAX_RANGE_MS: i64 = 31 * 24 * HOUR;
 const PAGE_BYTES: usize = 1024 * 1024;
 const BREAKDOWN_BYTES: usize = 8 * 1024 * 1024;
 
@@ -97,6 +108,11 @@ pub struct ResolvedRange {
 #[derive(Debug, Clone)]
 pub enum Selection {
     ActivityDate(NaiveDate),
+    /// Consecutive activity days, both inclusive: at most 31.
+    ActivityDates {
+        first: NaiveDate,
+        last: NaiveDate,
+    },
     Range(Range),
 }
 
@@ -162,14 +178,26 @@ pub struct Block {
     pub elapsed_ms: i64,
     pub idle_ms: i64,
     pub group: GroupKey,
+    /// Category of every focus interval in the block; null when uncategorized.
+    pub category: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum FocusCoverage {
-    Focus { window: Window, idle: bool },
-    NoFocus { idle: bool },
-    Gap { reason: String },
+    Focus {
+        window: Window,
+        idle: bool,
+        /// Configured category of the cleaned window; null when uncategorized.
+        #[serde(default)]
+        category: Option<String>,
+    },
+    NoFocus {
+        idle: bool,
+    },
+    Gap {
+        reason: String,
+    },
     Unknown,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -194,6 +222,23 @@ pub struct ImageCoverage {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Breakdown {
+    /// Every configured category in tree order (each followed by its
+    /// subcategories), then uncategorized focus (`category: null`) if any.
+    Category {
+        category: Option<String>,
+        /// Enclosing category of a subcategory.
+        parent: Option<String>,
+        /// Nesting level: 0 for top-level categories.
+        depth: usize,
+        /// `#rrggbb` color, else a 1-based categorical palette slot.
+        color: Option<String>,
+        palette: Option<u8>,
+        /// Focus in this category, including its subcategories.
+        elapsed_ms: i64,
+        /// Focus matched by this category's own rules.
+        own_ms: i64,
+        percent_of_focus: f64,
+    },
     Application {
         application: String,
         elapsed_ms: i64,
@@ -202,6 +247,7 @@ pub enum Breakdown {
     ExactTitle {
         application: String,
         title: String,
+        category: Option<String>,
         elapsed_ms: i64,
         percent_of_focus: f64,
     },
@@ -216,12 +262,39 @@ pub struct Totals {
     pub no_focus_ms: i64,
     pub idle_ms: i64,
 }
+impl Totals {
+    /// Adds the elapsed time of one coverage interval; uncertain time has none.
+    fn add(&mut self, coverage: &Coverage) {
+        let elapsed = coverage.elapsed_ms.unwrap_or(0);
+        let idle = match coverage.focus {
+            FocusCoverage::Focus { idle, .. } => {
+                self.focus_ms += elapsed;
+                idle
+            }
+            FocusCoverage::NoFocus { idle } => {
+                self.no_focus_ms += elapsed;
+                idle
+            }
+            _ => false,
+        };
+        if idle {
+            self.idle_ms += elapsed;
+        }
+    }
+}
 #[derive(Debug, Serialize)]
 pub struct Overview {
     pub revision: String,
     pub resolved: ResolvedRange,
     pub totals: Totals,
+    /// Context switches and focus stretches within the range.
+    pub metrics: FocusMetrics,
     pub breakdown: Page<Breakdown>,
+}
+#[derive(Debug, Serialize)]
+pub struct CategoryList {
+    pub categories: Vec<crate::categories::Category>,
+    pub problem: Option<String>,
 }
 #[derive(Debug, Serialize)]
 pub struct CursorEvidence {
@@ -229,6 +302,9 @@ pub struct CursorEvidence {
     /// Multiple entries disclose repeated wall times instead of choosing a segment silently.
     pub focus: Vec<Coverage>,
     pub screenshots: Vec<SelectedScreenshot>,
+    /// Screenshots from the selected time were deleted by retention, which
+    /// keeps them for a shorter period than observations.
+    pub screenshots_expired: bool,
 }
 #[derive(Debug, Serialize)]
 pub struct SelectedScreenshot {
@@ -266,7 +342,7 @@ pub struct Queries {
     history: History,
     timezone: Tz,
     grouping: Box<dyn Grouping>,
-    titles: Arc<TitleRules>,
+    settings: Arc<Settings>,
     cancelled: Option<Arc<AtomicBool>>,
 }
 impl Queries {
@@ -287,20 +363,35 @@ impl Queries {
             history: History::read(directory)?,
             timezone,
             grouping,
-            titles: Default::default(),
+            settings: Default::default(),
             cancelled: None,
         })
     }
-    /// Cleans focus titles in coverage, blocks and overviews; raw observations stay as recorded.
-    pub fn with_titles(mut self, titles: Arc<TitleRules>) -> Self {
-        self.titles = titles;
+    /// Title rules clean focus titles and categories classify focus in
+    /// coverage, blocks and overviews; raw observations stay as recorded.
+    pub fn with_settings(mut self, settings: Arc<Settings>) -> Self {
+        self.settings = settings;
         self
     }
-    /// Versions block IDs and analysis cursors by grouping and title rules.
-    fn analysis_version(&self) -> String {
-        match self.titles.version() {
+    /// Versions block IDs by grouping and title rules, which decide block extents.
+    fn block_version(&self) -> String {
+        match self.settings.titles.version() {
             "" => self.grouping.version().into(),
             titles => format!("{}+titles-{titles}", self.grouping.version()),
+        }
+    }
+    /// Versions analysis cursors and cached overviews by every analysis setting.
+    fn analysis_version(&self) -> String {
+        match self.settings.categories.version() {
+            "" => self.block_version(),
+            categories => format!("{}+categories-{categories}", self.block_version()),
+        }
+    }
+    /// Configured categories and any problem that made the settings file ignored.
+    pub fn categories(&self) -> CategoryList {
+        CategoryList {
+            categories: self.settings.categories.list().to_vec(),
+            problem: self.settings.problem.clone(),
         }
     }
     pub(crate) fn cancel_when(mut self, cancelled: Option<Arc<AtomicBool>>) -> Self {
@@ -318,34 +409,71 @@ impl Queries {
         Ok(())
     }
     pub fn resolve(&self, selection: Selection) -> Result<ResolvedRange> {
-        let range = match selection {
-            Selection::Range(range) => range,
-            Selection::ActivityDate(date) => {
-                let next = date.succ_opt().ok_or(QueryError::InvalidRequest)?;
-                let boundary = |date: NaiveDate| -> Result<i64> {
-                    let local = date
-                        .and_hms_opt(4, 0, 0)
-                        .ok_or(QueryError::InvalidRequest)?;
-                    // An exceptional timezone fold/gap at 04:00 needs an explicit
-                    // range, not an arbitrary choice of one possible boundary.
-                    Ok(self
-                        .timezone
-                        .from_local_datetime(&local)
-                        .single()
-                        .ok_or(QueryError::InvalidRequest)?
-                        .timestamp_millis())
-                };
+        // An exceptional timezone fold/gap at 04:00 needs an explicit range,
+        // not an arbitrary choice of one possible boundary.
+        let boundary = |date: NaiveDate| -> Result<i64> {
+            let local = date
+                .and_hms_opt(4, 0, 0)
+                .ok_or(QueryError::InvalidRequest)?;
+            Ok(self
+                .timezone
+                .from_local_datetime(&local)
+                .single()
+                .ok_or(QueryError::InvalidRequest)?
+                .timestamp_millis())
+        };
+        let next = |date: NaiveDate| date.succ_opt().ok_or(QueryError::InvalidRequest);
+        let (range, maximum) = match selection {
+            Selection::Range(range) => (range, MAX_RANGE_MS),
+            Selection::ActivityDate(date) => (
                 Range {
                     start_ms: boundary(date)?,
-                    end_ms: boundary(next)?,
+                    end_ms: boundary(next(date)?)?,
+                },
+                MAX_RANGE_MS,
+            ),
+            Selection::ActivityDates { first, last } => {
+                if !(0..31).contains(&(last - first).num_days()) {
+                    bail!(QueryError::InvalidRequest);
                 }
+                // 31 activity days can include a daylight-saving hour.
+                (
+                    Range {
+                        start_ms: boundary(first)?,
+                        end_ms: boundary(next(last)?)?,
+                    },
+                    MAX_RANGE_MS + HOUR,
+                )
             }
         };
-        range.validate(31 * 24 * HOUR)?;
+        range.validate(maximum)?;
         Ok(ResolvedRange {
             range,
             timezone: self.timezone.to_string(),
         })
+    }
+    /// The activity days intersecting `range`, each clipped to it.
+    fn activity_days(&self, range: Range) -> Result<Vec<(NaiveDate, Range)>> {
+        let mut days = Vec::new();
+        let mut date = self
+            .timezone
+            .timestamp_millis_opt(range.start_ms)
+            .single()
+            .ok_or(QueryError::InvalidRequest)?
+            .naive_local()
+            .checked_sub_signed(chrono::Duration::hours(4))
+            .ok_or(QueryError::InvalidRequest)?
+            .date();
+        loop {
+            let day = self.resolve(Selection::ActivityDate(date))?.range;
+            if day.start_ms >= range.end_ms {
+                return Ok(days);
+            }
+            if let Some(clipped) = range.clip(day.start_ms, day.end_ms) {
+                days.push((date, clipped));
+            }
+            date = date.succ_opt().ok_or(QueryError::InvalidRequest)?;
+        }
     }
     fn admit(&self, client: Client) -> Result<Permit> {
         self.check_cancelled()?;

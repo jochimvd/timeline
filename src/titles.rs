@@ -4,22 +4,11 @@ use crate::recording::Window;
 use anyhow::{Context, Result};
 use regex::Regex;
 use serde::Deserialize;
-use std::{
-    fs,
-    path::{Path, PathBuf},
-    sync::{Arc, Mutex, OnceLock},
-    time::SystemTime,
-};
 
-#[derive(Deserialize)]
+/// One `[[title_rules]]` entry of the settings file.
+#[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Settings {
-    #[serde(default)]
-    title_rules: Vec<RuleSettings>,
-}
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RuleSettings {
+pub(crate) struct RuleSettings {
     /// Exact application (window class); every application when absent.
     application: Option<String>,
     pattern: String,
@@ -40,10 +29,9 @@ pub struct TitleRules {
     version: String,
 }
 impl TitleRules {
-    pub fn parse(text: &str) -> Result<Self> {
-        let settings: Settings = toml::from_str(text)?;
+    pub(crate) fn new(settings: Vec<RuleSettings>) -> Result<Self> {
+        let version = crate::settings::version(&settings);
         let rules = settings
-            .title_rules
             .into_iter()
             .map(|rule| {
                 Ok(Rule {
@@ -54,43 +42,12 @@ impl TitleRules {
                 })
             })
             .collect::<Result<Vec<_>>>()?;
-        let version = if rules.is_empty() {
-            String::new()
-        } else {
-            blake3::hash(text.as_bytes()).to_hex()[..12].to_owned()
-        };
         Ok(Self { rules, version })
     }
 
-    /// Rules from a settings file; a missing file has none. Parsed rules are
-    /// reused until the file changes. An invalid file is reported once and
-    /// leaves titles raw rather than failing every query.
-    pub fn load(path: &Path) -> Arc<Self> {
-        type Loaded = Option<(PathBuf, Option<(SystemTime, u64)>, Arc<TitleRules>)>;
-        static LOADED: OnceLock<Mutex<Loaded>> = OnceLock::new();
-        let stamp = fs::metadata(path)
-            .ok()
-            .map(|m| (m.modified().unwrap_or(SystemTime::UNIX_EPOCH), m.len()));
-        let mut loaded = LOADED.get_or_init(Default::default).lock().unwrap();
-        if let Some((cached, cached_stamp, rules)) = loaded.as_ref()
-            && cached == path
-            && *cached_stamp == stamp
-        {
-            return rules.clone();
-        }
-        let rules = Arc::new(Self::read(path).unwrap_or_else(|error| {
-            eprintln!("ignoring title rules in {}: {error:#}", path.display());
-            Self::default()
-        }));
-        *loaded = Some((path.into(), stamp, rules.clone()));
-        rules
-    }
-    fn read(path: &Path) -> Result<Self> {
-        match fs::read_to_string(path) {
-            Ok(text) => Self::parse(&text),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
-            Err(error) => Err(error.into()),
-        }
+    /// Title rules of a complete settings file.
+    pub fn parse(text: &str) -> Result<Self> {
+        Ok(crate::settings::Settings::parse(text)?.titles)
     }
 
     pub fn version(&self) -> &str {
@@ -163,10 +120,11 @@ mod tests {
     }
 
     #[test]
-    fn missing_or_empty_settings_keep_raw_titles() {
-        let rules = TitleRules::load(Path::new("/nonexistent/timeline/config.toml"));
-        assert_eq!(rules.version(), "");
-        assert_eq!(rules.clean(&window("a", "⠋ x")).title, "⠋ x");
+    fn empty_or_invalid_rules_keep_raw_titles() {
+        assert_eq!(
+            TitleRules::default().clean(&window("a", "⠋ x")).title,
+            "⠋ x"
+        );
         assert_eq!(TitleRules::parse("").unwrap().version(), "");
         assert!(TitleRules::parse("[[title_rules]]\npattern = '('").is_err());
         assert!(TitleRules::parse("[[title_rule]]\npattern = 'x'").is_err());

@@ -10,6 +10,8 @@ struct Focus<'a> {
     furthest: i64,
     chunk: i64,
     boundary: Option<i64>,
+    /// Checkpoints share parsed evidence; reuse its cleaned, categorized focus.
+    classified: Option<(Arc<Evidence>, FocusCoverage)>,
 }
 impl<'a> Focus<'a> {
     fn new(queries: &'a Queries, range: Range) -> Self {
@@ -20,7 +22,18 @@ impl<'a> Focus<'a> {
             furthest: range.start_ms,
             chunk: 0,
             boundary: None,
+            classified: None,
         }
+    }
+    fn classify(&mut self, evidence: &Arc<Evidence>) -> FocusCoverage {
+        if let Some((last, focus)) = &self.classified
+            && Arc::ptr_eq(last, evidence)
+        {
+            return focus.clone();
+        }
+        let focus = classify(evidence, &self.queries.settings);
+        self.classified = Some((evidence.clone(), focus.clone()));
+        focus
     }
     fn recording_boundary(&mut self) -> Result<i64> {
         if let Some(boundary) = self.boundary {
@@ -54,13 +67,12 @@ impl<'a> Focus<'a> {
                 }
                 self.furthest = self.furthest.max(clipped.end_ms);
                 let recording_boundary = self.recording_boundary()?;
-                visit(interval(
-                    &old,
-                    &next,
-                    clipped,
-                    recording_boundary,
-                    &self.queries.titles,
-                ))?;
+                let focus = if continuous(&old, &next) {
+                    self.classify(&old.evidence)
+                } else {
+                    discontinuity(&next)
+                };
+                visit(interval(&old, &next, clipped, recording_boundary, focus))?;
             }
         }
         self.previous = Some(next);
@@ -85,7 +97,7 @@ impl<'a> Focus<'a> {
             .previous
             .take()
             .filter(|o| Some(o.id) == latest && o.unix_ms <= tail.start_ms);
-        match previous.map(|o| (classify(&o.evidence, &self.queries.titles), o)) {
+        match previous.map(|o| (self.classify(&o.evidence), o)) {
             Some((focus @ FocusCoverage::Gap { .. }, o)) => visit(Coverage {
                 range: tail,
                 segment: Some(o.segment),
@@ -99,26 +111,27 @@ impl<'a> Focus<'a> {
     }
 }
 
+fn continuous(old: &ScanObservation, next: &ScanObservation) -> bool {
+    old.segment == next.segment && next.monotonic_ms >= old.monotonic_ms
+}
+/// Focus between discontinuous observations: the reason for the next one, if known.
+fn discontinuity(next: &ScanObservation) -> FocusCoverage {
+    match next.evidence.as_ref() {
+        Evidence::Boundary { reason, .. } => FocusCoverage::Gap {
+            reason: reason.clone(),
+        },
+        _ => FocusCoverage::Unknown,
+    }
+}
 /// Evidence between two consecutive observations, clipped to the range.
 fn interval(
     old: &ScanObservation,
     next: &ScanObservation,
     clipped: Range,
     recording_boundary: i64,
-    titles: &TitleRules,
+    focus: FocusCoverage,
 ) -> Coverage {
-    let continuous = old.segment == next.segment && next.monotonic_ms >= old.monotonic_ms;
-    let focus = if continuous {
-        classify(&old.evidence, titles)
-    } else {
-        match next.evidence.as_ref() {
-            Evidence::Boundary { reason, .. } => FocusCoverage::Gap {
-                reason: reason.clone(),
-            },
-            _ => FocusCoverage::Unknown,
-        }
-    };
-    let elapsed_ms = (continuous
+    let elapsed_ms = (continuous(old, next)
         && matches!(
             focus,
             FocusCoverage::Focus { .. } | FocusCoverage::NoFocus { .. }
@@ -159,10 +172,7 @@ impl Queries {
         range.validate(48 * HOUR)?;
         let _permit = self.admit(client)?;
         let _snapshot = self.history.connection.unchecked_transaction()?;
-        let cursor = self.cursor(
-            format!("blocks:{range:?}:{}", self.analysis_version()),
-            &page,
-        )?;
+        let cursor = self.analysis_cursor(&format!("blocks:{range:?}"), &page)?;
         let mut output = Pager::new(cursor.clone(), &page);
         // Blocks never cross segments. Coverage from each segment's start keeps
         // a clipped block's original ID.
@@ -179,7 +189,7 @@ impl Queries {
     ) -> Result<()> {
         let mut blocks = Blocks {
             grouping: self.grouping.as_ref(),
-            version: self.analysis_version(),
+            version: self.block_version(),
             range,
             current: None,
         };
@@ -206,7 +216,12 @@ impl Blocks<'_> {
         coverage: Coverage,
         output: &mut impl FnMut(Block) -> Result<()>,
     ) -> Result<()> {
-        let FocusCoverage::Focus { window, idle } = &coverage.focus else {
+        let FocusCoverage::Focus {
+            window,
+            idle,
+            category,
+        } = &coverage.focus
+        else {
             return self.finish(output);
         };
         let key = self.grouping.key(window);
@@ -216,6 +231,7 @@ impl Blocks<'_> {
             b.segment == segment
                 && b.recording_boundary == coverage.recording_boundary
                 && b.group == key
+                && b.category == *category
                 && b.range.end_ms == coverage.range.start_ms
         });
         if !compatible {
@@ -230,6 +246,7 @@ impl Blocks<'_> {
                 elapsed_ms: 0,
                 idle_ms: 0,
                 group: key,
+                category: category.clone(),
             });
         }
         let block = self.current.as_mut().unwrap();
@@ -267,7 +284,7 @@ pub(super) fn is_boundary(evidence: &Evidence) -> bool {
         }
     )
 }
-fn classify(evidence: &Evidence, titles: &TitleRules) -> FocusCoverage {
+fn classify(evidence: &Evidence, settings: &Settings) -> FocusCoverage {
     match evidence {
         Evidence::State {
             state:
@@ -302,10 +319,17 @@ fn classify(evidence: &Evidence, titles: &TitleRules) -> FocusCoverage {
                 },
             ..
         } => match focus {
-            Some(window) => FocusCoverage::Focus {
-                window: titles.clean(window),
-                idle: *idle,
-            },
+            Some(window) => {
+                let window = settings.titles.clean(window);
+                FocusCoverage::Focus {
+                    category: settings
+                        .categories
+                        .classify(&window)
+                        .map(|category| category.name.clone()),
+                    window,
+                    idle: *idle,
+                }
+            }
             None => FocusCoverage::NoFocus { idle: *idle },
         },
         Evidence::Boundary { reason, .. } => FocusCoverage::Gap {
@@ -324,7 +348,7 @@ fn unknown(range: Range) -> Coverage {
         focus: FocusCoverage::Unknown,
     }
 }
-fn proportional(elapsed: i64, full: Range, clipped: Range) -> i64 {
+pub(super) fn proportional(elapsed: i64, full: Range, clipped: Range) -> i64 {
     // Difference of cumulative elapsed fractions makes adjacent clips additive.
     let offset = |time: i64| {
         (i128::from(time) - i128::from(full.start_ms)) * i128::from(elapsed)

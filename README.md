@@ -5,7 +5,7 @@ A local Rust desktop activity recorder for Linux, Wayland, and Hyprland.
 The recorder stores original active-window observations, input-idle state, and
 per-monitor screenshots in durable local history. It includes persistent
 pause/resume, explicit recording boundaries, bounded evidence inspection, and
-30-day retention. A shared Rust evidence service provides activity aggregation
+retention of 30 days for screenshots and a year for activity metadata. A shared Rust evidence service provides activity aggregation
 and coverage-aware screenshot selection, shared by a bundled browser timeline
 and read-only local MCP server. Integrated acceptance measurements and remaining gates are recorded in
 [the acceptance report](docs/acceptance/2026-09-22.md).
@@ -76,8 +76,12 @@ timing segments; focus duration must never be inferred across these boundaries.
 Disk/storage errors terminate the recorder with an error rather than acknowledging
 unsaved observations. The user service can then restart it.
 
-Metadata cleanup runs at startup and hourly for observations older than 30 elapsed
-days. A persisted retention clock uses elapsed boot time, including suspend, so a
+Cleanup runs at startup and hourly. Screenshots are kept for 30 elapsed days and
+observations, which are small (a few MB per day) and feed trends, for 365
+(`SCREENSHOT_RETENTION_MS` and `METADATA_RETENTION_MS` in `src/config.rs`). Older
+activity therefore stays visible without screenshots; once any have expired,
+`cursor_evidence` sets `screenshots_expired` for times before the oldest retained
+capture, and the browser says so rather than reporting missing evidence. A persisted retention clock uses elapsed boot time, including suspend, so a
 wall-clock jump cannot expire recent history during the same boot or recorder
 restart. Across a machine reboot, nonnegative wall-clock elapsed time is the
 fallback; elapsed time while powered off cannot be independently verified.
@@ -98,9 +102,22 @@ and MCP adapters. Open one connection per worker with `Queries::open(history_pat
 All operations take `Client::Browser` or `Client::Mcp`; adapters must supply their
 own client class rather than accepting it from a request. The service offers:
 
-- `overview`: activity date or an explicit half-open range, at most 31 days;
-  application/exact-title totals, idle/no-focus totals, and paginated independent
-  focus/image coverage. Totals include recorded idle focus and do not imply task time.
+- `overview`: activity date, consecutive activity dates (`Selection::ActivityDates`,
+  both inclusive, at most 31 even across a daylight-saving change) or an explicit
+  half-open range, at most 31 days;
+  category/application/exact-title totals, idle/no-focus totals, and paginated
+  independent focus/image coverage, and [focus metrics](#focus-metrics) for the
+  range. Totals include recorded idle focus and do not imply task time.
+- `focus_metrics`: [focus metrics](#focus-metrics), focus totals, focus by
+  category and application, and [evidence](#day-evidence) per activity day of a
+  selection of at most 31 days, from one coverage scan without image coverage.
+  Each day matches the overview metrics of that day.
+- `categories`: the configured [categories](#categories) and their rules, plus
+  the reason the settings file was ignored, if it was invalid.
+- `commits`: the user's own [git commits](#git-commits) in an activity date,
+  consecutive dates or range of at most 31 days, with commits per activity day and
+  the repositories that could not be read. `repositories` lists the configured
+  paths and the repositories found under them.
 - `overview_display`: optional display-point budget (1–2048) for lossy timeline
   coverage. The browser sends `display_points` to the overview endpoint. Totals
   remain exact; the default overview and MCP contract continue to return originals.
@@ -108,8 +125,9 @@ own client class rather than accepting it from a request. The service offers:
   maximum 500 records per page. Screenshot listings can filter by monitor.
 - `observation`: retrieve one retained original observation by ID.
 - `cursor_evidence`: focus and per-monitor screenshot evidence for a selected UTC
-  millisecond, including actual capture timestamps, unavailable samples and stale
-  flags. Repeated wall times return distinct timing segments.
+  millisecond, including actual capture timestamps, unavailable samples, stale
+  flags and whether screenshots there have expired. Repeated wall times return
+  distinct timing segments.
 - `image`: retrieve the exact screenshot ID and its metadata with a bounded byte
   stream; missing/expired references or files return `QueryError::Unavailable`.
   `preview` returns a lossy rendition of at most 64–4096 pixels per edge instead.
@@ -174,7 +192,8 @@ contract is exercised through real temporary SQLite histories in `tests/queries.
 Window titles often carry noise such as an AI tool's progress spinner or an
 editor's unsaved marker, which splits one window into many exact titles. Rules in
 `$XDG_CONFIG_HOME/timeline/config.toml` (default `~/.config/timeline/config.toml`)
-clean titles before analysis:
+clean titles before analysis (the same file configures [categories](#categories)
+and [git commits](#git-commits)):
 
 ```toml
 # Spinner and status glyphs set by terminal AI tools, in any application.
@@ -193,7 +212,184 @@ title is trimmed. Cleaned titles are used by focus coverage, activity blocks,
 overviews and the timeline, in the browser and over MCP. Recorded observations keep
 the raw title, so rules apply to all retained history and can be changed at any
 time. The recorder rereads the file when it changes; an invalid file is logged and
-ignored. Changing rules changes block IDs and invalidates analysis cursors.
+ignored as a whole (title rules, categories and git paths), with the reason shown in the browser and over MCP. Changing rules changes block IDs;
+continuing an analysis listing from before the change returns
+`QueryError::CursorInvalidated`.
+
+### Categories
+
+Categories classify focus time by application and cleaned title, like project or
+activity categories in other time trackers. Define them in the same file:
+
+```toml
+[[categories]]
+name = "Timeline"
+color = "#4f8cff"          # optional
+[[categories.rules]]
+application = "code"       # optional exact window class
+title = '(?i)timeline'     # optional regex searched in the cleaned title
+[[categories.rules]]
+title = 'localhost:47831'
+
+[[categories]]
+name = "Communication"
+[[categories.rules]]
+application = "Slack"
+```
+
+A rule matches when all of its given fields match; it needs at least one. The
+first category in file order with a matching rule wins, and focus matching none
+is uncategorized. Title patterns are case-sensitive unless they start with `(?i)`.
+Names must be unique and colors look like `#rrggbb`.
+
+A category can name a `parent`, nesting it as a subcategory, up to four levels:
+
+```toml
+[[categories]]
+name = "Work"
+
+[[categories]]
+name = "Project X"
+parent = "Work"
+[[categories.rules]]
+title = '(?i)project-x'
+```
+
+Parents can be declared anywhere in the file and need no rules of their own; a
+parent's rules catch whatever its subcategories don't. Rules still match in file
+order whatever their level, so order specific rules first. The hierarchy decides
+how time rolls up: focus belongs to the most specific matching category and
+counts toward each of its ancestors.
+
+Top-level categories without a `color` take the next of eight palette colors in
+file order (chosen per light/dark theme by the browser); later ones are shown in
+the neutral uncategorized color. Subcategories carry their parent's color unless
+they set their own.
+
+Categories are computed at query time like title rules: nothing is stored, so
+edits re-categorize all retained history in the browser and over MCP. Every focus
+coverage interval, activity block and exact-title total carries its most specific
+`category` (`null` when uncategorized); blocks never span two categories.
+Overviews start with one row per configured category in tree order (each
+followed by its subcategories), with its `parent`, `depth`, `elapsed_ms`
+including subcategories and `own_ms` from its own rules, then uncategorized
+focus. Per-day focus metrics list each category's own time. Category switches and
+focus stretches use the most specific category. The browser can show categories
+at the top level or in full detail. Editing categories leaves block IDs unchanged
+but restarts analysis listings. A category describes observed focus, not task
+attribution.
+
+### Focus metrics
+
+Like the focus statistics of other time trackers, focus metrics summarize how
+observed focus moved, computed at query time from the same focus coverage as
+totals; nothing extra is recorded. They describe observed focus, not task time,
+and make no judgement of the work.
+
+Both metrics work within *active runs*: adjacent focus coverage intervals in one
+timing segment and recording session, each either non-idle focus or a confirmed
+absence of focus. Idle periods, recording gaps (pause, lock, restart, suspend),
+unknown time and timing boundaries end a run. Durations are monotonic elapsed time
+within a segment; uncertain intervals contribute none.
+
+- **Active focus** (`active_ms`) is focus time outside idle periods.
+- A **context switch** is a change between consecutive focused windows of a run:
+  `application_switches` count application changes and, with categories
+  configured, `category_switches` count category changes, with uncategorized focus
+  as one more value (otherwise `null`). Passing through no focused window between
+  two applications still switches; a transition across idle, a gap or a boundary
+  does not. Rates are switches per hour of active focus, to one decimal.
+- A **focus stretch** is a continuous run of active focus on one *subject*: the
+  category of categorized focus, otherwise the application. It ends at the end of
+  its run or when focus moves to another subject, except for a *brief
+  interruption*: focus elsewhere, or no focus, lasting less than
+  `BRIEF_INTERRUPTION_MS` (60 s) before focus returns to the subject, provided all
+  bridged interruptions take at most `MAX_INTERRUPTED_PERCENT` (10%) of the
+  stretch. A 30-second glance at chat therefore needs 4.5 minutes on the subject
+  first, and rapid alternation remains short stretches with many switches. Bridged
+  interruptions still count as switches. A stretch's `elapsed_ms` is its active
+  focus, including focus during bridged interruptions, so stretches partition
+  active focus. Its `range` runs from its first to its last focus on the subject.
+- `longest_stretch` is the earliest longest stretch, with its range, subject and
+  bridged `interruptions`. `stretches` divides all stretches into `long` (at least
+  25 minutes), `medium` (10–25) and `short` (under 10), each with a count and
+  elapsed time, as a picture of fragmentation.
+- `hours` lists local clock hours with active focus or switches: active focus and
+  the switches that began in that hour, clipped to the range.
+
+Metrics are clipped to the requested range like totals: a stretch crossing its
+edge is cut there, and a transition exactly at its start has no observed
+predecessor. Per-day metrics therefore add up to a multi-day range except for
+stretches and switches across 04:00.
+
+### Day evidence
+
+Each `focus_metrics` day also says how much of it has evidence, so a day without
+recorded focus is not mistaken for a day without activity. `categories` lists
+recorded (`focus_ms`) and active (`active_ms`) focus per configured category in
+file order, then uncategorized focus, each only with focus (empty without
+categories); `applications` does the same per application, most focus first.
+`evidence` splits the day's wall-clock time into `observed_ms` (focus, idle or a
+confirmed absence of focus), `gap_ms` (recording gaps: pause, lock, disconnect,
+restart, suspend) and `unknown_ms` (no evidence), with the merged `intervals`
+of each kind and gap `reason`. Gaps and unknown time count only up to the time of
+the query, so the future of the current day is none of them and the totals add up
+to its elapsed part. Subject and evidence entries share the 8 MiB breakdown budget.
+
+### Git commits
+
+Commits show when the user saved work in a repository, beside recorded focus. List
+directories to search for repositories in the same file:
+
+```toml
+[git]
+paths = ["~/work"]               # searched recursively; ~ is the home directory
+# authors = ["me@example.com"]   # extra author emails that are yours
+# depth = 8                      # directory levels searched below each path (1–16)
+```
+
+Repositories are found up to `depth` levels below each path, including nested
+checkouts, work trees and submodules (`.git` files). Hidden directories and
+`node_modules`, `target`, `venv`, `site-packages`, `__pycache__` and
+`bower_components` are skipped, symbolic links are not followed, a search visits
+at most 50,000 directories, and a repository reached through several work trees is
+listed once, named after its main work tree relative to the configured path. The
+search is reused for five minutes (or until the paths change). Empty `.git`
+directories, such as container mount points, are ignored; broken `.git` files and
+directories without `HEAD` are reported.
+
+A commit is the user's when its author email is the repository's effective
+`user.email` (as `git config user.email` reports it, including conditional
+includes such as `includeIf "gitdir:~/work/"`) or one of `authors`, compared
+case-insensitively. A repository without either is reported.
+
+Times come from the reflog, which records when a commit was made in this clone;
+author and committer dates can be days off after rebases and cherry-picks. Counted
+reflog events are those that create a commit here: `commit` (including initial,
+amend, merge and cherry-pick conflict resolutions), `cherry-pick`, `revert`, `am`,
+and a `merge` or `pull` that made a merge commit. Rebases, resets, checkouts,
+fetches, pulls and fast-forwards only move existing commits and are not counted,
+so a rebased branch keeps its commits where they were first made, under their
+original hashes. A commit in several reflogs (HEAD, its branch, other work trees)
+counts once, with the branch from the branch reflog; a detached commit has no
+branch. An amend replaces the commit it amended: it appears once, at its final
+version, with `amends` and the time the original was made (`first_ms`). Only the
+newest 8 MiB of a reflog is read. A repository without reflogs
+(`core.logAllRefUpdates = false`) falls back to committer dates across all refs,
+which also counts commits fetched from elsewhere; its commits say `timing:
+"committer_date"` instead of `"reflog"`.
+
+Commits are read at query time and never recorded, retained or cached beyond
+memory: reflogs are plain files, read only if modified since the range began;
+author and subject come from one `git cat-file --batch` per repository with
+commits in range, and `user.email` from `git config`. Commit objects are cached
+in memory, identities for five minutes. Git runs read-only with
+`--no-optional-locks`, no prompts or pager, for at most 3 seconds and 16 MiB of
+output per command and 8 seconds per query; a repository that fails or is skipped
+is reported in `problems` without failing the others, and its commits are missing
+rather than absent. Commit queries take a query admission slot like other
+evidence reads. A commit list over 1 MiB returns `LimitExceeded`. Commits are
+evidence that work on a repository was saved at a moment, not task attribution.
 
 ## Screenshot capture
 
@@ -285,7 +481,10 @@ cargo clippy --all-targets --locked -- -D warnings
 ```
 
 Tests use real temporary SQLite databases, controlled recording events/clocks,
-synthetic Hyprland sockets, and child processes. The daemon process test removes
+synthetic Hyprland sockets, and child processes. Commit tests create real temporary
+git repositories (amends, cherry-picks, rebases, nested repositories, work trees,
+other authors, unreadable and broken repositories) with a global git configuration
+of their own, set before any test thread starts. The daemon process test removes
 desktop connection variables, so it never records the developer's real windows.
 It verifies durable pause after SIGKILL, singleton recording, and inspection.
 The ignored `live_capture` test requires two explicitly provisioned headless
@@ -311,9 +510,66 @@ appears in a URL. Sessions expire on process restart. Public HTML/CSS/JavaScript
 contain no recorded evidence; evidence endpoints require authentication.
 
 The timeline sits above screenshots and supports hover previews, committed
-scrubbing, expandable application lanes, focus and screenshot coverage, a date
-picker, zoom/panning, visual application/exact-title breakdowns, monitor layouts,
-and image enlargement. Breakdown totals follow the visible range. Date changes
+scrubbing, expandable application or category lanes, focus and screenshot
+coverage, a date picker, zoom/panning, visual category/application/exact-title
+breakdowns, monitor layouts, and image enlargement. Breakdown totals follow the
+visible range. With categories configured, "Color by" switches timeline fills,
+labels and lanes between applications, top-level categories and, once any
+category is nested, subcategories (remembered per browser). Subcategories that
+carry their parent's color are drawn in distinct shades of it. The breakdown adds
+a composition bar of top-level categories and the category tree ranked by time
+within each level, and a collapsed
+"Category rules" panel lists the active definitions. The focus summary leads with
+stat tiles for recorded and active focus, context switches per active hour, the
+longest focus stretch ("Show on timeline" marks it, selects its start and moves
+keyboard focus to the timeline) and the share of active focus in long stretches,
+then a stretch-length bar and an hourly switch table. A timeline track shades each
+hour by its application or category switches (following "Color by") on a fixed
+five-step scale, and the hover preview reports that hour's switches. Like the
+breakdown, metrics follow the loaded range.
+
+With [git paths](#git-commits) configured, a commit track marks the user's commits
+in the visible range; commits that would overlap at the current scale share a
+numbered marker, which separates when zoomed in. Hovering a marker lists its
+commits (subject, repository, branch, short hash and time) in the timeline
+preview; the track is one tab stop where arrow keys move between markers and focus
+shows the same details. Clicking a marker, or Enter, selects that moment. The
+focus summary lists the loaded range's commits, each selecting its moment. Commits
+are read with the range and checked again about once a minute. A track label
+names repositories that could not be read and opens the collapsed "Git
+repositories" details at the end of the page, which list the configured paths,
+the repositories found, their problems and a Rescan button; without paths it shows
+how to add them. Ticks show seconds only for windows under 20 minutes.
+
+Day, Week and Month switch views; the URL names the view and period
+(`?date=2026-10-07`, `?view=week&date=2026-10-05`, `?view=month&date=2026-10-01`),
+so it can be linked and survives reload, and Back returns from a day opened from a
+week. Weeks are seven activity days starting on Monday; months are calendar months
+of activity days. Each period view shows stat tiles for recorded focus, switches
+per active hour, the longest stretch ("Show in day view") and time in long
+stretches, each compared with the *comparison period*: the same number of activity
+days immediately before (the previous week, or for a month as many days as it
+has). While a period is in progress, the comparison stops at the same activity day
+and time of day, so weekdays and working hours line up. A day without observed
+evidence (paused, locked, recorder stopped or not yet running) is missing
+evidence, not a day without activity: its column is hatched, the evidence line
+lists such days in both periods, and a comparison period without any evidence
+shows no changes. Below are columns of active focus per day stacked by category
+(following "Color by"; applications fold beyond the top seven) with idle focus on
+top, each category's or application's active focus against the comparison period,
+small multiples of switches per active hour, longest stretch and long-stretch share
+by day, and an hour-of-day heatmap of active focus or switches, hatched where an
+hour has no evidence. With git paths configured, the number of the user's commits
+stands beneath each day's column (a dot where columns are narrow) and in its
+tooltip, by repository, and in the daily table; a day without focus evidence can
+still show commits. Day columns, trend charts and heatmap cells show details on
+hover and keyboard focus; clicking one, or Enter, opens that day (a heatmap cell
+marks its hour). Arrow keys move between days or hours, Shift+arrows change the
+period, and Home returns to the current one. Tables under each chart carry every
+value. An in-progress period reloads every minute while visible.
+
+The page follows the system
+light or dark preference; colors come from theme tokens in `web/style.css`. Date changes
 preserve zoom and monitor layout. Superseded requests are aborted and their
 results discarded, including images still fetching or decoding. Server-side
 selection scans also cancel when a newer generation arrives from the same
@@ -346,7 +602,11 @@ Read-only tools:
 
 | Tool | Arguments |
 | --- | --- |
-| `overview` | `date` (YYYY-MM-DD) **or** `range: {start_ms, end_ms}`, optional `cursor`, `limit` |
+| `overview` | `date` (YYYY-MM-DD) **or** `dates: {first, last}` (inclusive) **or** `range: {start_ms, end_ms}`, optional `cursor`, `limit` |
+| `focus_metrics` | `date`, `dates` **or** `range` (at most 31 days); per-day totals, focus by category/application, [evidence](#day-evidence) and [focus metrics](#focus-metrics) |
+| `categories` | none; the configured category rules |
+| `commits` | `date`, `dates` **or** `range` (at most 31 days); the user's [git commits](#git-commits) and commits per day |
+| `repositories` | none; configured git paths, repositories found and problems |
 | `blocks` / `observations` | `range`, optional `cursor`, `limit` |
 | `observation` | original observation `id` |
 | `screenshots` | `range`, optional `monitor`, `cursor`, `limit` |
@@ -357,8 +617,15 @@ are tool results with `isError: true` and an explicit error code. Unknown tools
 and malformed arguments are JSON-RPC errors. Read metadata first, follow all
 continuation cursors, and fetch images only where useful. Focus is evidence rather
 than task attribution; keep ambiguity unassigned, gaps unknown, and avoid counting
-the same elapsed time once per monitor. Tasks, estimates and corrections belong
-in the agent conversation.
+the same elapsed time once per monitor. Overview category totals and the category on
+blocks and exact titles are the user's own classification and a useful starting
+point, but they are not task attribution either. Commits are the user's own work
+saved in a repository at a moment, useful to name the task behind focus, but not
+task time; `problems` names repositories whose commits are missing. Focus metrics (in `overview` and
+per day in `focus_metrics`) describe observed switching and sustained focus, not
+productivity. A day without observed evidence is missing evidence rather than a
+day without activity; comparisons should use periods of equal length and name
+evidence missing from either. Tasks, estimates and corrections belong in the agent conversation.
 
 Query admission remains two expensive reads globally, at most one from MCP.
 Adapters allow four blocking operations and sixteen active request handlers,
@@ -404,10 +671,22 @@ npm run test:web
 cargo test --locked
 ```
 
-The Svelte views live in `web/App.svelte`, `Timeline.svelte`,
-`Breakdown.svelte` and `EvidenceViewer.svelte`. `web/model.ts` owns application
-state, request cancellation and hover scheduling; `web/images.ts` owns tile
-decoding, reuse and bitmap cleanup; `ScreenshotCanvas.svelte` owns canvas surfaces. Views render state without manually
+`web/App.svelte` is the page shell: header, view switch and URL routing
+(`web/routes.ts`), recording status (`web/recording.ts`) and the session bootstrap
+(`web/session.ts`). Week and month views (`PeriodView.svelte`, with
+`DailyFocusChart`, `SubjectComparison`, `TrendChart` and `HourHeatmap`) render
+state from `web/period.ts`, which loads a period and its comparison, and
+`web/trends.ts`, which derives summaries, stacks, changes and heatmap cells.
+`web/commits.ts` clusters commit markers and groups commits by day and repository;
+`RepositoryDetails.svelte` shows where commits come from. The day view (`DayView.svelte`)
+combines `Timeline.svelte`, `EvidenceViewer.svelte` and `Breakdown.svelte` (with
+`FocusPatterns.svelte`); stat tiles share `StatTile.svelte` and the remembered
+"Color by" choice lives in `web/preferences.ts`, the category tree helpers in
+`web/categories.ts`. `web/metrics.ts` holds the
+focus-metric scales and labels and `web/dates.ts` activity-date arithmetic.
+`web/model.ts` owns day state, request cancellation and hover scheduling;
+`web/images.ts` owns tile decoding, reuse and bitmap cleanup;
+`ScreenshotCanvas.svelte` owns canvas surfaces. Views render state without manually
 rebuilding DOM trees. Range updates preserve the displayed evidence while
 replacement data loads.
 
@@ -471,6 +750,12 @@ node scripts/acceptance/viewer-resources.mjs --idle
 The script prints aggregate resource measurements without credentials, activity
 titles or screenshot contents. See the
 [viewer performance measurements](docs/acceptance/2026-09-22-viewer.md).
+
+To look at the UI with three weeks of varied synthetic focus, demo categories and
+commits in two temporary repositories, run
+`cargo run --example web_fixture -- --demo 127.0.0.1:47850` and open the printed
+URL. It uses temporary history, settings and repositories, never the desktop,
+retained history or the developer's git configuration.
 
 Browser tests verify that the bundled JavaScript matches Svelte/TypeScript and exercise
 the real HTTP/query/history stack in headless Chromium with two synthetic monitor

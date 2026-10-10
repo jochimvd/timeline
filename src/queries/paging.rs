@@ -56,6 +56,24 @@ impl Queries {
             )?,
         })
     }
+    /// Cursor for derived analysis of `scope`. A continuation from before a
+    /// change of grouping, title rules or categories must restart the listing.
+    pub(super) fn analysis_cursor(&self, scope: &str, page: &PageRequest) -> Result<Cursor> {
+        let query = format!("{scope}:{}", self.analysis_version());
+        if let Some(token) = page.cursor.as_deref().filter(|token| token.len() <= 4096)
+            && let Some(old) = decode_cursor(token)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<Cursor>(&bytes).ok())
+            && old.query != query
+            && old
+                .query
+                .strip_prefix(scope)
+                .is_some_and(|version| version.starts_with(':'))
+        {
+            bail!(QueryError::CursorInvalidated);
+        }
+        self.cursor(query, page)
+    }
     /// Process caches are keyed by the database file, never shared across histories.
     pub(super) fn database_key(&self) -> Result<String> {
         let path = self

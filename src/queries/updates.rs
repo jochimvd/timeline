@@ -13,6 +13,7 @@ pub struct OverviewUpdates {
     pub revision: String,
     pub reset: bool,
     pub totals: Option<Totals>,
+    pub metrics: Option<FocusMetrics>,
     pub changes: Page<OverviewChange>,
 }
 impl Queries {
@@ -56,6 +57,7 @@ impl Queries {
             revision: revision.clone(),
             reset,
             totals: None,
+            metrics: None,
             changes: Page {
                 items: vec![],
                 next_cursor: None,
@@ -115,6 +117,7 @@ impl Queries {
             revision,
             reset: false,
             totals: Some(next.totals.clone()),
+            metrics: Some(next.metrics.clone()),
             changes: output.finish()?,
         })
     }

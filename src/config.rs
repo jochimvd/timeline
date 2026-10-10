@@ -6,7 +6,11 @@ use std::{
     sync::OnceLock,
 };
 
-pub const RETENTION_MS: i64 = 30 * 24 * 60 * 60 * 1000;
+const DAY_MS: i64 = 24 * 60 * 60 * 1000;
+/// Observations are small (a few MB per day) and feed trends, so they outlive
+/// screenshots, which dominate storage.
+pub const METADATA_RETENTION_MS: i64 = 365 * DAY_MS;
+pub const SCREENSHOT_RETENTION_MS: i64 = 30 * DAY_MS;
 pub const CLEANUP_INTERVAL_MS: i64 = 60 * 60 * 1000;
 // Leave headroom for bounded socket/storage work before the five-second limit.
 pub const CHECKPOINT_INTERVAL_MS: i64 = 4_000;

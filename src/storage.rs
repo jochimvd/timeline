@@ -42,7 +42,8 @@ pub(crate) fn snapshot(directory: &Path) -> Result<Value> {
         "tile_reuse_percent": tiles.reuse_percent(),
         "thumbnail_cache_bytes": crate::thumbnails::usage(),
         "thumbnail_cache_limit": crate::thumbnails::BYTE_LIMIT,
-        "retention_days": crate::config::RETENTION_MS / 86_400_000,
+        "metadata_retention_days": crate::config::METADATA_RETENTION_MS / 86_400_000,
+        "screenshot_retention_days": crate::config::SCREENSHOT_RETENTION_MS / 86_400_000,
         "measured_ms": SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as u64
     }))
 }
