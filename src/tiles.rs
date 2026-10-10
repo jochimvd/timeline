@@ -423,7 +423,10 @@ impl History {
             return Ok(None);
         };
         let pixels = codec::pixel_bytes(width, height)?;
-        ensure!(tile_size > 0 && tile_size <= 16383, "invalid tile grid");
+        ensure!(
+            tile_size > 0 && tile_size <= codec::MAX_DIMENSION,
+            "invalid tile grid"
+        );
         let ids = map_ids(&map)?;
         let columns = width.div_ceil(tile_size);
         ensure!(

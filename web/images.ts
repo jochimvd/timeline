@@ -3,6 +3,7 @@ import type { Shot } from "./types";
 const PIXEL_LIMIT = 96 * 1024 * 1024;
 const BUNDLE_LIMIT = 32 * 1024 * 1024;
 const HEADER_LIMIT = 4 * 1024 * 1024;
+const MAX_DIMENSION = 16383; // largest WebP edge, as codec::MAX_DIMENSION
 type Tile = { key: string; bitmap: ImageBitmap; bytes: number; refs: number };
 type Header = {
   version: number; width: number; height: number; tile_size: number;
@@ -25,7 +26,7 @@ function parseBundle(bytes: Uint8Array<ArrayBuffer>, width: number, height: numb
   if (length > HEADER_LIMIT || length + 4 > bytes.length) throw new Error("Invalid tile bundle header");
   const h = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes.subarray(4, length + 4))) as Header;
   if (!h || h.version !== 1 || h.width !== width || h.height !== height || !integer(h.tile_size)
-    || h.tile_size > 16383 || !Array.isArray(h.tiles) || !Array.isArray(h.map)) throw new Error("Invalid tile dimensions");
+    || h.tile_size > MAX_DIMENSION || !Array.isArray(h.tiles) || !Array.isArray(h.map)) throw new Error("Invalid tile dimensions");
   const columns = Math.ceil(width / h.tile_size), rows = Math.ceil(height / h.tile_size);
   if (h.map.length !== columns * rows || h.map.length > 4096 || !h.tiles.length || h.tiles.length > h.map.length)
     throw new Error("Invalid tile map");
@@ -201,7 +202,7 @@ export function createImageLoader(pool = createImagePool(), thumbnail = false) {
         if (s.unavailable) { frame.error = "Unavailable: " + s.unavailable; continue; }
         const dimensions = thumbnail ? previewDimensions(s.width, s.height) : s;
         const pixelBytes = dimensions.width * dimensions.height * 4;
-        if (!integer(s.width) || !integer(s.height) || s.width > 16383 || s.height > 16383
+        if (!integer(s.width) || !integer(s.height) || s.width > MAX_DIMENSION || s.height > MAX_DIMENSION
           || decodedBytes + pixelBytes > PIXEL_LIMIT) {
           frame.error = "Display memory limit. Select this monitor individually."; continue;
         }

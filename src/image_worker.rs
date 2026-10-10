@@ -46,7 +46,10 @@ impl Pixels {
 impl PixelBudget {
     pub fn allocate(&self, width: u32, height: u32) -> Result<Option<Pixels>> {
         ensure!(
-            width > 0 && height > 0 && width <= 16383 && height <= 16383,
+            width > 0
+                && height > 0
+                && width <= crate::codec::MAX_DIMENSION
+                && height <= crate::codec::MAX_DIMENSION,
             "unsupported image dimensions"
         );
         let bytes = width as usize * height as usize * 4;
