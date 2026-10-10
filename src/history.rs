@@ -56,7 +56,8 @@ impl History {
             .try_lock()
             .context("another recorder owns this history directory")?;
         let connection = Connection::open(directory.join("history.sqlite3"))?;
-        connection.busy_timeout(Duration::from_millis(500))?;
+        // SQLITE_BUSY is terminal for the writer; outlast image-cleanup commits.
+        connection.busy_timeout(Duration::from_secs(5))?;
         let version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
         ensure!(
             matches!(version, 0 | 4 | 5),
