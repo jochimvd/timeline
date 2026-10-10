@@ -1,7 +1,8 @@
-//! User analysis settings from `config.toml`: title rules and categories. Both
-//! are applied at query time over original evidence, so editing the file
-//! reinterprets all retained history without rewriting it.
-use crate::{categories::Categories, titles::TitleRules};
+//! User analysis settings from `config.toml`: title rules, categories and the
+//! git repositories whose commits are shown. All are applied at query time over
+//! original evidence, so editing the file reinterprets all retained history
+//! without rewriting it.
+use crate::{categories::Categories, git::GitSources, titles::TitleRules};
 use anyhow::Result;
 use serde::Deserialize;
 use std::{
@@ -18,12 +19,16 @@ struct File {
     title_rules: Vec<crate::titles::RuleSettings>,
     #[serde(default)]
     categories: Vec<crate::categories::CategorySettings>,
+    #[serde(default)]
+    git: crate::git::GitSettings,
 }
 
 #[derive(Default)]
 pub struct Settings {
     pub titles: TitleRules,
     pub categories: Categories,
+    /// Where to find the user's repositories for commit evidence.
+    pub git: GitSources,
     /// Why the file was ignored, if it was invalid or unreadable.
     pub problem: Option<String>,
 }
@@ -33,6 +38,13 @@ impl Settings {
         Ok(Self {
             titles: TitleRules::new(file.title_rules)?,
             categories: Categories::new(file.categories)?,
+            git: GitSources::new(
+                file.git,
+                std::env::var_os("HOME")
+                    .filter(|home| !home.is_empty())
+                    .map(PathBuf::from)
+                    .as_deref(),
+            )?,
             problem: None,
         })
     }
