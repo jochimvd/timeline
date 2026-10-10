@@ -242,24 +242,29 @@ first category in file order with a matching rule wins, and focus matching none
 is uncategorized. Title patterns are case-sensitive unless they start with `(?i)`.
 Names must be unique and colors look like `#rrggbb`.
 
-A category can name a `parent`, nesting it as a subcategory, up to four levels:
+Categories nest as `children`, up to four levels. Inline rule arrays keep deeper
+levels readable:
 
 ```toml
 [[categories]]
 name = "Work"
 
-[[categories]]
-name = "Project X"
-parent = "Work"
-[[categories.rules]]
-title = '(?i)project-x'
+  [[categories.children]]
+  name = "Project X"
+  rules = [
+    { application = "dev.zed.Zed" },
+    { title = '(?i)project-x' },
+    { application = "kitty", title = '(?i)review|setup', fallback = true },
+  ]
 ```
 
-Parents can be declared anywhere in the file and need no rules of their own; a
-parent's rules catch whatever its subcategories don't. Rules still match in file
-order whatever their level, so order specific rules first. The hierarchy decides
-how time rolls up: focus belongs to the most specific matching category and
-counts toward each of its ancestors.
+Parents need no rules of their own; a parent's rules catch whatever its
+subcategories don't. Rules match in file order whatever their level, so order
+specific rules first. A rule with `fallback = true` is tried only after every
+other rule, which suits broad keyword guesses that would otherwise take windows
+from categories later in the file. The hierarchy decides how time rolls up: focus
+belongs to the most specific matching category and counts toward each of its
+ancestors.
 
 Top-level categories without a `color` take the next of eight palette colors in
 file order (chosen per light/dark theme by the browser); later ones are shown in

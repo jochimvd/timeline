@@ -1,14 +1,14 @@
 //! User-defined categories that classify focus time by application and cleaned
 //! window title, e.g. "Communication" or a project. A category is a derived
 //! view over original evidence, not task attribution: nothing is persisted, and
-//! editing the rules re-categorizes all retained history. A category can name
-//! a `parent`, nesting it as a subcategory: rules still match in configuration
-//! order, and the hierarchy only decides how time rolls up and colors carry down.
+//! editing the rules re-categorizes all retained history. Categories nest as
+//! `children`: rules match in file order, the hierarchy decides how time rolls
+//! up and colors carry down.
 use crate::recording::Window;
 use anyhow::{Context, Result, ensure};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::HashSet;
 
 /// Top-level categories without an explicit color take one of this many
 /// palette slots, in configuration order. Later ones share the neutral
@@ -17,20 +17,21 @@ pub const PALETTE_SLOTS: u8 = 8;
 /// Nesting levels, counting top-level categories as the first.
 pub const MAX_DEPTH: usize = 4;
 
-/// One `[[categories]]` entry of the settings file.
+/// One `[[categories]]` entry of the settings file, with its subcategories.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct CategorySettings {
     name: String,
-    /// Name of the enclosing category, making this one a subcategory.
-    parent: Option<String>,
     color: Option<String>,
     #[serde(default)]
     rules: Vec<CategoryRule>,
+    #[serde(default)]
+    children: Vec<CategorySettings>,
 }
 
 /// Matches when every given field matches: `application` is an exact window
-/// class and `title` a regex searched in the cleaned title.
+/// class and `title` a regex searched in the cleaned title. Fallback rules are
+/// tried only after every other rule, for broad guesses.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CategoryRule {
@@ -38,6 +39,8 @@ pub struct CategoryRule {
     pub application: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub fallback: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -63,28 +66,32 @@ struct Matcher {
 
 #[derive(Default)]
 pub struct Categories {
-    /// In tree order: each category followed by its subcategories.
+    /// In file order, which is tree order: each category followed by its
+    /// subcategories.
     categories: Vec<Category>,
     /// Index of each category's parent in `categories`.
     parents: Vec<Option<usize>>,
-    /// In configuration order, independent of the hierarchy.
+    /// Regular rules in file order, then fallback rules in file order.
     matchers: Vec<Matcher>,
     /// Empty without categories, so uncategorized cursors stay stable.
     version: String,
 }
 impl Categories {
     pub(crate) fn new(settings: Vec<CategorySettings>) -> Result<Self> {
-        let version = crate::settings::version(&settings);
-        let mut index = HashMap::new();
-        for (position, category) in settings.iter().enumerate() {
-            let name = category.name.trim();
+        let mut result = Self {
+            version: crate::settings::version(&settings),
+            ..Self::default()
+        };
+        let mut names = HashSet::new();
+        let mut fallbacks = Vec::new();
+        let mut slots = 0;
+        // Depth-first, so each category precedes its subcategories.
+        let mut pending: Vec<_> = settings.into_iter().rev().map(|c| (c, None)).collect();
+        while let Some((category, parent)) = pending.pop() {
+            let name = category.name.trim().to_owned();
+            ensure!(!name.is_empty(), "a category has an empty name");
             ensure!(
-                !name.is_empty(),
-                "category {} has an empty name",
-                position + 1
-            );
-            ensure!(
-                index.insert(name, position).is_none(),
+                names.insert(name.clone()),
                 "category {name:?} is defined twice"
             );
             if let Some(color) = &category.color {
@@ -95,70 +102,14 @@ impl Categories {
                     "category {name:?} color must look like #4f8cff"
                 );
             }
-        }
-        let parents = settings
-            .iter()
-            .map(|category| {
-                let Some(parent) = &category.parent else {
-                    return Ok(None);
-                };
-                let name = category.name.trim();
-                let parent = *index.get(parent.trim()).with_context(|| {
-                    format!("category {name:?} has an undefined parent {parent:?}")
-                })?;
-                Ok(Some(parent))
-            })
-            .collect::<Result<Vec<_>>>()?;
-        for (position, category) in settings.iter().enumerate() {
-            let mut ancestor = parents[position];
-            for _ in 1..MAX_DEPTH {
-                let Some(next) = ancestor else { break };
-                ensure!(
-                    next != position,
-                    "category {:?} is its own ancestor",
-                    category.name.trim()
-                );
-                ancestor = parents[next];
-            }
-            ensure!(
-                ancestor.is_none(),
-                "category {:?} is nested more than {MAX_DEPTH} levels deep",
-                category.name.trim()
-            );
-        }
-
-        // Depth-first from top-level categories, siblings in configuration order.
-        let mut order = Vec::with_capacity(settings.len());
-        let mut pending: Vec<usize> = (0..settings.len())
-            .rev()
-            .filter(|&position| parents[position].is_none())
-            .collect();
-        while let Some(position) = pending.pop() {
-            order.push(position);
-            pending.extend(
-                (0..settings.len())
-                    .rev()
-                    .filter(|&child| parents[child] == Some(position)),
-            );
-        }
-        let mut placed = vec![0; settings.len()];
-        for (tree, &position) in order.iter().enumerate() {
-            placed[position] = tree;
-        }
-
-        let mut result = Self {
-            version,
-            ..Self::default()
-        };
-        for (position, category) in settings.iter().enumerate() {
-            let name = category.name.trim();
+            let position = result.categories.len();
             for rule in &category.rules {
                 ensure!(
                     rule.application.is_some() || rule.title.is_some(),
                     "a rule of category {name:?} needs an application or a title"
                 );
-                result.matchers.push(Matcher {
-                    category: placed[position],
+                let matcher = Matcher {
+                    category: position,
                     application: rule.application.clone(),
                     title: rule
                         .title
@@ -166,17 +117,16 @@ impl Categories {
                         .map(Regex::new)
                         .transpose()
                         .with_context(|| format!("invalid title pattern in category {name:?}"))?,
-                });
+                };
+                if rule.fallback {
+                    fallbacks.push(matcher);
+                } else {
+                    result.matchers.push(matcher);
+                }
             }
-        }
-        let mut settings: Vec<_> = settings.into_iter().map(Some).collect();
-        let mut slots = 0;
-        for &position in &order {
-            let category = settings[position].take().expect("each category once");
-            let parent = parents[position].map(|parent| placed[parent]);
             // Only top-level categories take palette slots; subcategories
             // carry their parent's color unless they set their own.
-            let (color, palette, depth) = match parent.map(|parent| &result.categories[parent]) {
+            let (color, palette, depth) = match parent.map(|p: usize| &result.categories[p]) {
                 Some(parent) => (
                     category.color.or_else(|| parent.color.clone()),
                     parent.palette,
@@ -190,16 +140,28 @@ impl Categories {
                     (category.color, palette, 0)
                 }
             };
+            ensure!(
+                depth < MAX_DEPTH,
+                "category {name:?} is nested more than {MAX_DEPTH} levels deep"
+            );
             result.categories.push(Category {
-                name: category.name.trim().to_owned(),
-                parent: parent.map(|parent| result.categories[parent].name.clone()),
+                parent: parent.map(|p| result.categories[p].name.clone()),
+                name,
                 depth,
                 palette: if color.is_some() { None } else { palette },
                 color,
                 rules: category.rules,
             });
             result.parents.push(parent);
+            pending.extend(
+                category
+                    .children
+                    .into_iter()
+                    .rev()
+                    .map(|child| (child, Some(position))),
+            );
         }
+        result.matchers.extend(fallbacks);
         Ok(result)
     }
 
@@ -207,8 +169,8 @@ impl Categories {
         &self.version
     }
 
-    /// Configured categories in tree order: each category followed by its
-    /// subcategories, siblings in configuration order.
+    /// Configured categories in file order: each category followed by its
+    /// subcategories.
     pub fn list(&self) -> &[Category] {
         &self.categories
     }
@@ -219,8 +181,8 @@ impl Categories {
         std::iter::successors(start, |&position| self.parents[position])
     }
 
-    /// The category of the first matching rule in configuration order,
-    /// whatever its place in the hierarchy.
+    /// The category of the first matching rule in file order, whatever its
+    /// place in the hierarchy, trying fallback rules last.
     pub fn classify(&self, window: &Window) -> Option<&Category> {
         self.matchers
             .iter()
@@ -296,35 +258,31 @@ mod tests {
     }
 
     #[test]
-    fn subcategories_nest_in_tree_order_but_rules_match_in_file_order() {
+    fn nested_categories_match_in_file_order_with_fallback_rules_last() {
         let settings = Settings::parse(
             r##"
             [[categories]]
-            name = "Project X"
-            parent = "Acme"
-            [[categories.rules]]
-            title = 'project-x'
+            name = "Personal"
+            color = "#2fb344"
+              [[categories.children]]
+              name = "Dotfiles"
+              rules = [{ title = 'dotfiles' }]
 
             [[categories]]
             name = "Work"
-            [[categories.rules]]
-            title = 'Jira'
-
-            [[categories]]
-            name = "Personal"
-            color = "#2fb344"
-
-            [[categories]]
-            name = "Acme"
-            parent = "Work"
-            [[categories.rules]]
-            application = "teams"
-
-            [[categories]]
-            name = "Dotfiles"
-            parent = "Personal"
-            [[categories.rules]]
-            title = 'dotfiles'
+            rules = [{ title = 'Jira' }]
+              [[categories.children]]
+              name = "Acme"
+              rules = [{ application = "teams" }]
+                [[categories.children.children]]
+                name = "Project X"
+                rules = [
+                  { title = 'project-x' },
+                  { application = "terminal", title = 'Review', fallback = true },
+                ]
+              [[categories.children]]
+              name = "Globex"
+              rules = [{ application = "terminal", title = 'monorepo' }]
             "##,
         )
         .unwrap();
@@ -335,11 +293,12 @@ mod tests {
                 .map(|c| (c.name.as_str(), c.parent.as_deref(), c.depth))
                 .collect::<Vec<_>>(),
             [
+                ("Personal", None, 0),
+                ("Dotfiles", Some("Personal"), 1),
                 ("Work", None, 0),
                 ("Acme", Some("Work"), 1),
                 ("Project X", Some("Acme"), 2),
-                ("Personal", None, 0),
-                ("Dotfiles", Some("Personal"), 1),
+                ("Globex", Some("Work"), 1),
             ]
         );
         // Subcategories carry their top-level color or palette slot.
@@ -348,22 +307,25 @@ mod tests {
                 .map(|c| (c.color.as_deref(), c.palette))
                 .collect::<Vec<_>>(),
             [
-                (None, Some(1)),
-                (None, Some(1)),
-                (None, Some(1)),
                 (Some("#2fb344"), None),
                 (Some("#2fb344"), None),
+                (None, Some(1)),
+                (None, Some(1)),
+                (None, Some(1)),
+                (None, Some(1)),
             ]
         );
-        let name = |title| {
+        let name = |application, title| {
             categories
-                .classify(&window("browser", title))
+                .classify(&window(application, title))
                 .map(|c| c.name.as_str())
         };
-        // "Project X" is first in the file, so it wins over its ancestor's rule.
-        assert_eq!(name("Jira - project-x"), Some("Project X"));
-        assert_eq!(name("Jira board"), Some("Work"));
-        assert_eq!(name("dotfiles"), Some("Dotfiles"));
+        // A parent's rule earlier in the file wins over a subcategory's.
+        assert_eq!(name("browser", "Jira - project-x"), Some("Work"));
+        assert_eq!(name("browser", "project-x"), Some("Project X"));
+        // The fallback rule only applies once no other rule matches.
+        assert_eq!(name("terminal", "Review monorepo"), Some("Globex"));
+        assert_eq!(name("terminal", "Review"), Some("Project X"));
         assert_eq!(
             categories
                 .lineage("Project X")
@@ -383,11 +345,11 @@ mod tests {
             "[[categories]]\nname = 'A'\n[[categories.rules]]\ntitle = '('",
             "[[categories]]\nname = 'A'\n[[categories.rules]]\nclass = 'x'",
             "[[categories]]\nname = 'A'\nparent = 'B'",
-            "[[categories]]\nname = 'A'\nparent = 'A'",
-            "[[categories]]\nname = 'A'\nparent = 'B'\n[[categories]]\nname = 'B'\nparent = 'A'",
-            "[[categories]]\nname = 'A'\n[[categories]]\nname = 'B'\nparent = 'A'\n\
-             [[categories]]\nname = 'C'\nparent = 'B'\n[[categories]]\nname = 'D'\nparent = 'C'\n\
-             [[categories]]\nname = 'E'\nparent = 'D'",
+            "[[categories]]\nname = 'A'\n[[categories.children]]\nname = 'A'",
+            "[[categories]]\nname = 'A'\n[[categories.children]]\nname = 'B'\n\
+             [[categories.children.children]]\nname = 'C'\n\
+             [[categories.children.children.children]]\nname = 'D'\n\
+             [[categories.children.children.children.children]]\nname = 'E'",
         ] {
             assert!(Settings::parse(text).is_err(), "{text}");
         }

@@ -189,7 +189,7 @@
     {/if}
     {#if configured}
       <details class="breakdown-details" bind:open={rulesOpen}>
-        <summary>Category rules <span class="muted">· first match in file order wins, at any level</span></summary>
+        <summary>Category rules <span class="muted">· first match in file order wins, fallbacks last</span></summary>
         {#if list}
           <ol class="category-rules" id="category-rules">
             {#each list.categories as category (category.name)}
@@ -197,7 +197,7 @@
                 <span class="category-tag"><span class="swatch" style={swatchStyle(swatchOf(category.name))}></span>{category.name}</span>
                 <ul>
                   {#each category.rules as rule}
-                    <li>{#if rule.application}<code>{rule.application}</code>{/if}{#if rule.application && rule.title}{" with "}{/if}{#if rule.title}{"title ~ "}<code>{rule.title}</code>{/if}</li>
+                    <li>{#if rule.application}<code>{rule.application}</code>{/if}{#if rule.application && rule.title}{" with "}{/if}{#if rule.title}{"title ~ "}<code>{rule.title}</code>{/if}{#if rule.fallback}<span class="muted"> · fallback</span>{/if}</li>
                   {:else}<li>No rules</li>{/each}
                 </ul>
               </li>
