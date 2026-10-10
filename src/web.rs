@@ -1,6 +1,6 @@
 //! Authenticated loopback adapters. All evidence semantics remain in Queries.
 use crate::queries::{Client, PageRequest, Queries, QueryError, Range, Selection};
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 use axum::{
     Json, Router,
     body::{Body, Bytes},
@@ -27,7 +27,7 @@ use std::{
 };
 use tokio::sync::Semaphore;
 
-pub const ADDRESS: &str = "127.0.0.1:47831";
+pub const ADDRESS: &str = crate::config::HTTP_ADDRESS;
 const VERSIONS: &[&str] = &["2025-03-26", "2025-06-18", "2025-11-25"];
 const IMAGE_LIMIT: u64 = 24 * 1024 * 1024;
 
@@ -716,42 +716,32 @@ async fn mcp(State(state): State<Arc<Web>>, headers: HeaderMap, body: Bytes) -> 
     Json(json!({"jsonrpc":"2.0","id":id,"result":result})).into_response()
 }
 
-/// Bind before returning: an endpoint failure is a service failure, never hidden.
+/// Bind before returning so the caller can report an unavailable endpoint. The
+/// server stops once `stop` is set; its own failure never stops recording.
 pub fn start(
     state: Arc<Web>,
     stop: Arc<AtomicBool>,
 ) -> Result<std::thread::JoinHandle<Result<()>>> {
-    let listener = std::net::TcpListener::bind(&state.authority)?;
+    let listener = std::net::TcpListener::bind(&state.authority)
+        .with_context(|| format!("cannot bind HTTP endpoint {}", state.authority))?;
     listener.set_nonblocking(true)?;
     Ok(std::thread::spawn(move || {
-        struct StopOnExit(Arc<AtomicBool>);
-        impl Drop for StopOnExit {
-            fn drop(&mut self) {
-                self.0.store(true, Ordering::Relaxed);
-            }
-        }
-        let _stop_on_exit = StopOnExit(stop.clone());
-        let result = (|| {
-            let runtime = tokio::runtime::Builder::new_multi_thread()
-                .worker_threads(2)
-                .max_blocking_threads(6)
-                .enable_all()
-                .build()?;
-            runtime.block_on(async {
-                let listener = tokio::net::TcpListener::from_std(listener)?;
-                let shutdown = stop.clone();
-                axum::serve(listener, state.router())
-                    .with_graceful_shutdown(async move {
-                        while !shutdown.load(Ordering::Relaxed) {
-                            tokio::time::sleep(Duration::from_millis(100)).await;
-                        }
-                    })
-                    .await?;
-                Ok(())
-            })
-        })();
-        stop.store(true, Ordering::Relaxed);
-        result
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .max_blocking_threads(6)
+            .enable_all()
+            .build()?;
+        runtime.block_on(async {
+            let listener = tokio::net::TcpListener::from_std(listener)?;
+            axum::serve(listener, state.router())
+                .with_graceful_shutdown(async move {
+                    while !stop.load(Ordering::Relaxed) {
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                    }
+                })
+                .await?;
+            Ok(())
+        })
     }))
 }
 

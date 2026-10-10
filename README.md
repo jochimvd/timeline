@@ -49,7 +49,9 @@ Stopping the process with SIGINT/SIGTERM preserves committed evidence.
 History lives under `$XDG_DATA_HOME/timeline` or `~/.local/share/timeline`.
 The recorder makes that directory private and takes a single-writer file lock.
 Its control socket is private to the user. HTTP binds only to
-`127.0.0.1:47831` and authenticates evidence access. Never point experiments at retained history; use a temporary
+`127.0.0.1:47831` (or the loopback address in `TIMELINE_HTTP_ADDRESS`) and
+authenticates evidence access. An unavailable HTTP port does not stop recording:
+`status` reports `web_error` and binding is retried. Never point experiments at retained history; use a temporary
 `XDG_DATA_HOME` instead. Defaults live in Rust source.
 
 ## Evidence and recovery

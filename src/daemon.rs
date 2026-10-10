@@ -1,25 +1,31 @@
+//! Recorder process wiring. Source and endpoint failures degrade coverage or
+//! access; persistence failures stop the run rather than acknowledging unsaved
+//! evidence.
+mod control;
+mod endpoint;
+mod source;
+
 use crate::{
-    desktop::Hyprland,
-    recording::{Input, Recorder, Stamp, Window},
+    history::History,
+    recording::{Input, Recorder, Stamp},
+    screenshots::Screenshots,
     session::Session,
 };
-use anyhow::{Context, Result, bail, ensure};
-use serde_json::json;
+use anyhow::Result;
+use serde_json::{Value, json};
 use std::{
-    env, fs,
-    io::{Read, Write},
-    os::unix::{
-        fs::PermissionsExt,
-        net::{UnixListener, UnixStream},
-    },
-    path::{Path, PathBuf},
+    fmt,
+    path::Path,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
     thread,
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
+
+pub use control::request;
+pub use source::publish_focus_changes;
 
 pub fn now() -> Result<Stamp> {
     fn clock(id: libc::clockid_t) -> Result<i64> {
@@ -42,236 +48,111 @@ pub fn now() -> Result<Stamp> {
     })
 }
 
-pub fn request(directory: &Path, command: &str) -> Result<String> {
-    let mut stream = UnixStream::connect(directory.join("control.sock"))
-        .context("recorder is not reachable; start `timeline run`")?;
-    stream.set_write_timeout(Some(Duration::from_secs(2)))?;
-    stream.set_read_timeout(Some(Duration::from_secs(3)))?;
-    writeln!(stream, "{command}")?;
-    let mut response = String::new();
-    stream.take(1_048_577).read_to_string(&mut response)?;
-    ensure!(
-        response.len() <= 1_048_576,
-        "control response exceeded limit"
-    );
-    let value: serde_json::Value = serde_json::from_str(&response)?;
-    if let Some(error) = value.get("error") {
-        bail!("control request failed: {error}");
-    }
-    Ok(response)
-}
-
 pub fn run(directory: &Path) -> Result<()> {
-    // The writer lock is acquired before reclaiming a stale control socket.
-    let mut recorder = Recorder::open(directory, now()?)?;
-    recorder.enable_background_cleanup()?;
-    let socket_path = directory.join("control.sock");
-    match fs::remove_file(&socket_path) {
-        Ok(()) => (),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
-        Err(error) => return Err(error.into()),
-    }
-    let listener = UnixListener::bind(&socket_path)?;
-    fs::set_permissions(&socket_path, fs::Permissions::from_mode(0o600))?;
-    listener.set_nonblocking(true)?;
-    let _socket_cleanup = SocketCleanup(socket_path);
+    // Take the writer lock, then the control socket and endpoint configuration,
+    // before the startup boundary: a failed start leaves history unchanged.
+    let history = History::open(directory)?;
+    let control = control::Control::bind(directory)?;
     let stop = Arc::new(AtomicBool::new(false));
     for signal in [signal_hook::consts::SIGINT, signal_hook::consts::SIGTERM] {
         signal_hook::flag::register(signal, Arc::clone(&stop))?;
     }
-    let web = crate::web::Web::new(directory, crate::web::ADDRESS)?;
-    let server = crate::web::start(web.clone(), stop.clone())?;
-    let mut screenshots = crate::screenshots::Screenshots::new(directory)?;
-    let mut source: Option<(Session, Hyprland)> = None;
-    let mut retry_at = Instant::now();
-    let mut desktop_error: Option<String> = None;
+    let mut endpoint =
+        endpoint::Endpoint::new(directory, &crate::config::http_address()?, stop.clone())?;
+    endpoint.step();
+    let mut recorder = Recorder::start(history, now()?)?;
+    recorder.enable_background_cleanup()?;
+    let mut desktop = source::Desktop::new();
+    let mut screenshots = Screenshots::new(directory)?;
     while !stop.load(Ordering::Relaxed) {
-        if source.is_none() && Instant::now() >= retry_at {
-            match connect() {
-                Ok((session, hyprland)) => {
-                    recorder.apply(
-                        Input::Connected {
-                            locked: session.locked(),
-                            idle: session.idle(),
-                        },
-                        now()?,
-                    )?;
-                    source = Some((session, hyprland));
-                    desktop_error = None;
-                }
-                Err(error) => {
-                    let message = format!("{error:#}");
-                    if desktop_error.as_ref() != Some(&message) {
-                        eprintln!("Desktop unavailable: {message}");
-                    }
-                    desktop_error = Some(message);
-                    retry_at = Instant::now() + Duration::from_secs(2);
-                }
-            }
+        desktop.step(&mut recorder)?;
+        let captured = screenshots.step(&mut recorder, desktop.session());
+        if let Some(message) = gap_on_source_failure(captured)? {
+            desktop.disconnect(&mut recorder, message)?;
         }
-        if let Some((session, hyprland)) = source.as_mut() {
-            // Source errors end coverage. Storage failures propagate and stop the
-            // recorder rather than pretending that evidence was committed.
-            let events = session
-                .events()
-                .and_then(|events| Ok((events, hyprland.drain()?)));
-            match events {
-                Ok((events, changes)) => {
-                    for input in events {
-                        recorder.apply(input, now()?)?;
-                    }
-                    recorder.apply(Input::Tick, now()?)?;
-                    let status = recorder.status();
-                    if !status.manual_paused && !status.locked {
-                        if !status.focus_known {
-                            match hyprland.refresh().and_then(|focus| {
-                                session.synchronize()?;
-                                Ok((focus, session.events()?))
-                            }) {
-                                Ok((focus, events)) => {
-                                    // Do not publish a snapshot taken across even
-                                    // a lock/unlock cycle that has already ended.
-                                    let crossed_boundary =
-                                        events.iter().any(|e| matches!(e, Input::Locked(_)));
-                                    for input in events {
-                                        recorder.apply(input, now()?)?;
-                                    }
-                                    if !crossed_boundary {
-                                        publish_focus_changes(&mut recorder, vec![focus], || {
-                                            session.events()
-                                        })?;
-                                    }
-                                }
-                                Err(error) => desktop_error = Some(format!("{error:#}")),
-                            }
-                        } else if !changes.is_empty() {
-                            // Establish the current compositor lock state after
-                            // draining IPC, then check it between every commit.
-                            session.synchronize()?;
-                            publish_focus_changes(&mut recorder, changes, || session.events())?;
-                        }
-                    }
-                }
-                Err(error) => desktop_error = Some(format!("{error:#}")),
-            }
-            if desktop_error.is_some() {
-                recorder.apply(Input::Disconnected, now()?)?;
-                source = None;
-                retry_at = Instant::now() + Duration::from_secs(2);
-                eprintln!("Desktop disconnected; recording gap started");
-            }
-        } else {
-            recorder.apply(Input::Tick, now()?)?;
-        }
-        screenshots.step(&mut recorder, source.as_mut().map(|(session, _)| session))?;
-        for _ in 0..4 {
-            let (mut stream, _) = match listener.accept() {
-                Ok(client) => client,
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
-                Err(error) => return Err(error.into()),
-            };
-            stream.set_read_timeout(Some(Duration::from_millis(50)))?;
-            stream.set_write_timeout(Some(Duration::from_millis(50)))?;
-            let command = read_command(&mut stream);
-            let response = match command.as_deref() {
-                Ok("launch") => match web.launch_url() {
-                    Ok(url) => json!({"url":url}),
-                    Err(_) => {
-                        json!({"error":"browser launch unavailable; retry after pending credentials expire"})
-                    }
-                },
-                Ok("pause") => {
-                    recorder.apply(Input::Pause, now()?)?;
-                    json!({"ok":true})
-                }
-                Ok("resume") => {
-                    recorder.apply(Input::Resume, now()?)?;
-                    json!({"ok":true})
-                }
-                Ok("status") => {
-                    json!({"recording":recorder.status(), "desktop_error":desktop_error, "screenshot_error":screenshots.error})
-                }
-                _ => json!({"error":"expected status, pause, or resume followed by a newline"}),
-            };
-            // A disappearing control client cannot stop the recorder.
-            let _ = writeln!(stream, "{response}");
-        }
+        endpoint.step();
+        control.serve(|command| match command {
+            Some("launch") => Ok(match endpoint.launch_url() {
+                Ok(url) => json!({"url":url}),
+                Err(error) => json!({"error":format!("browser launch unavailable: {error:#}")}),
+            }),
+            Some("pause") => acknowledge(&mut recorder, Input::Pause),
+            Some("resume") => acknowledge(&mut recorder, Input::Resume),
+            Some("status") => Ok(json!({
+                "recording": recorder.status(),
+                "desktop_error": desktop.error,
+                "screenshot_error": screenshots.error,
+                "web_error": endpoint.error,
+            })),
+            _ => Ok(json!({"error":"expected status, pause, or resume followed by a newline"})),
+        })?;
         thread::sleep(Duration::from_millis(50));
     }
     recorder.apply(Input::Disconnected, now()?)?;
-    server
-        .join()
-        .map_err(|_| anyhow::anyhow!("HTTP server panicked"))??;
+    endpoint.shutdown();
     Ok(())
 }
 
-/// Publish a received focus batch while giving session boundaries priority.
-/// The callback is the external lock/idle notification source; callers establish
-/// a compositor synchronization barrier before entering this publication loop.
-/// Any error is terminal for the current recording run, leaving uncertain time
-/// after its last durable observation for restart recovery.
-pub fn publish_focus_changes(
-    recorder: &mut Recorder,
-    changes: Vec<Option<Window>>,
-    mut session_events: impl FnMut() -> Result<Vec<Input>>,
-) -> Result<()> {
-    for focus in changes {
-        let events = session_events()?;
-        let crossed_boundary = events.iter().any(|event| matches!(event, Input::Locked(_)));
-        for input in events {
-            recorder.apply(input, now()?)?;
-        }
-        if crossed_boundary || recorder.status().locked || recorder.status().manual_paused {
-            break;
-        }
-        recorder.apply(Input::Focus(focus), now()?)?;
-        if !recorder.status().focus_known {
-            // A suspend/clock/stall boundary may have been detected while this
-            // batch was in flight. Discard the remaining pre-boundary results.
-            break;
-        }
+/// Success is reported only after the command's state is committed.
+fn acknowledge(recorder: &mut Recorder, input: Input) -> Result<Value> {
+    recorder.apply(input, now()?)?;
+    Ok(json!({"ok":true}))
+}
+
+/// Apply pending session notifications; a session failure ends coverage.
+pub(crate) fn apply_session_events(recorder: &mut Recorder, session: &mut Session) -> Result<()> {
+    for input in session.events().source_failure()? {
+        recorder.apply(input, now()?)?;
     }
     Ok(())
 }
 
-fn connect() -> Result<(Session, Hyprland)> {
-    let runtime =
-        PathBuf::from(env::var_os("XDG_RUNTIME_DIR").context("XDG_RUNTIME_DIR is not set")?);
-    let signature = env::var("HYPRLAND_INSTANCE_SIGNATURE")
-        .context("HYPRLAND_INSTANCE_SIGNATURE is not set")?;
-    ensure!(
-        !signature.is_empty() && !signature.contains('/'),
-        "invalid Hyprland instance signature"
-    );
-    let mut session = Session::connect()?;
-    let mut hyprland = Hyprland::connect(&runtime.join("hypr").join(signature))?;
-    hyprland.drain()?;
-    session.synchronize()?;
-    session.events()?;
-    Ok((session, hyprland))
-}
+/// A desktop source failure: it ends coverage with a recording gap followed by
+/// a reconnect. Unmarked errors (storage, clock) remain terminal.
+#[derive(Debug)]
+pub(crate) struct SourceError(anyhow::Error);
 
-fn read_command(stream: &mut UnixStream) -> Result<String> {
-    let mut bytes = Vec::new();
-    let deadline = Instant::now() + Duration::from_millis(50);
-    for _ in 0..16 {
-        let remaining = deadline
-            .checked_duration_since(Instant::now())
-            .context("control request timed out")?;
-        stream.set_read_timeout(Some(remaining.max(Duration::from_millis(1))))?;
-        let mut byte = [0];
-        stream.read_exact(&mut byte)?;
-        if byte[0] == b'\n' {
-            return Ok(String::from_utf8(bytes)?);
-        }
-        bytes.push(byte[0]);
+impl fmt::Display for SourceError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{:#}", self.0)
     }
-    bail!("control command too long")
 }
 
-struct SocketCleanup(PathBuf);
-impl Drop for SocketCleanup {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(&self.0);
+impl std::error::Error for SourceError {}
+
+pub(crate) trait SourceResult<T> {
+    /// Mark an error from the desktop source as a `SourceError`.
+    fn source_failure(self) -> Result<T>;
+}
+
+impl<T> SourceResult<T> for Result<T> {
+    fn source_failure(self) -> Result<T> {
+        self.map_err(|error| SourceError(error).into())
+    }
+}
+
+/// Separate a source failure, returned as its message, from terminal errors.
+pub(crate) fn gap_on_source_failure(result: Result<()>) -> Result<Option<String>> {
+    match result {
+        Err(error) if error.is::<SourceError>() => Ok(Some(format!("{error:#}"))),
+        result => result.map(|()| None),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use anyhow::{Context, anyhow};
+
+    #[test]
+    fn only_marked_source_failures_become_gaps() {
+        let source: Result<()> = Err(anyhow!("Wayland synchronization timed out"));
+        assert_eq!(
+            gap_on_source_failure(source.source_failure().context("publishing focus")).unwrap(),
+            Some("publishing focus: Wayland synchronization timed out".into())
+        );
+        let storage: Result<()> = Err(anyhow!("database is locked"));
+        assert!(gap_on_source_failure(storage).is_err());
+        assert_eq!(gap_on_source_failure(Ok(())).unwrap(), None);
     }
 }

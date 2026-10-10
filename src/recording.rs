@@ -46,7 +46,12 @@ pub struct Recorder {
 
 impl Recorder {
     pub fn open(directory: &Path, stamp: Stamp) -> Result<Self> {
-        let mut history = History::open(directory)?;
+        Self::start(History::open(directory)?, stamp)
+    }
+
+    /// Begin a recording run on an opened writer: retention cleanup and the
+    /// startup boundary are the run's first history changes.
+    pub fn start(mut history: History, stamp: Stamp) -> Result<Self> {
         let previous = history.latest()?;
         let boot_id = std::fs::read_to_string("/proc/sys/kernel/random/boot_id")?;
         let retention_now = history.advance_retention_clock(&boot_id, stamp.boot_ms, stamp.unix_ms);
