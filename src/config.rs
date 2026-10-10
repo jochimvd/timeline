@@ -25,6 +25,21 @@ pub fn history_directory() -> Result<PathBuf> {
     Ok(home.join(".local/share/timeline"))
 }
 
+/// User settings: `$XDG_CONFIG_HOME/timeline/config.toml`, else under `~/.config`.
+pub fn settings_file() -> Result<PathBuf> {
+    if let Some(value) = env::var_os("XDG_CONFIG_HOME").filter(|value| !value.is_empty()) {
+        let directory = PathBuf::from(value);
+        if directory.is_absolute() {
+            return Ok(directory.join("timeline/config.toml"));
+        }
+    }
+    let home = PathBuf::from(
+        env::var_os("HOME").context("HOME or an absolute XDG_CONFIG_HOME is required")?,
+    );
+    ensure!(home.is_absolute(), "HOME must be absolute");
+    Ok(home.join(".config/timeline/config.toml"))
+}
+
 /// Default HTTP endpoint; `TIMELINE_HTTP_ADDRESS` may choose another loopback one.
 pub const HTTP_ADDRESS: &str = "127.0.0.1:47831";
 

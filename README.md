@@ -169,6 +169,32 @@ remaining acceptance limitations.
 The existing CLI inspection commands retain their original behavior. The query
 contract is exercised through real temporary SQLite histories in `tests/queries.rs`.
 
+### Title rules
+
+Window titles often carry noise such as an AI tool's progress spinner or an
+editor's unsaved marker, which splits one window into many exact titles. Rules in
+`$XDG_CONFIG_HOME/timeline/config.toml` (default `~/.config/timeline/config.toml`)
+clean titles before analysis:
+
+```toml
+# Spinner and status glyphs set by terminal AI tools, in any application.
+[[title_rules]]
+pattern = '^[\x{2800}-\x{28FF}◐◑◒◓✳✢✶✻✽]\s+'
+
+# VS Code's unsaved-changes dot. `application` is an exact window class.
+[[title_rules]]
+application = "code"
+pattern = '^●\s+'
+```
+
+Each rule replaces every match of its [regex](https://docs.rs/regex/latest/regex/#syntax)
+`pattern` with `replacement` (default empty); rules apply in order and a changed
+title is trimmed. Cleaned titles are used by focus coverage, activity blocks,
+overviews and the timeline, in the browser and over MCP. Recorded observations keep
+the raw title, so rules apply to all retained history and can be changed at any
+time. The recorder rereads the file when it changes; an invalid file is logged and
+ignored. Changing rules changes block IDs and invalidates analysis cursors.
+
 ## Screenshot capture
 
 Persistent `ext-image-copy-capture-v1` sessions capture each named Wayland output

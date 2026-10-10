@@ -1,5 +1,6 @@
 //! Authenticated loopback adapters. All evidence semantics remain in Queries.
 use crate::queries::{Client, PageRequest, Queries, QueryError, Range, Selection};
+use crate::titles::TitleRules;
 use anyhow::{Context, Result, ensure};
 use axum::{
     Json, Router,
@@ -42,6 +43,8 @@ struct SelectionWork {
 }
 pub struct Web {
     directory: PathBuf,
+    /// Settings file with title rules for analysis; titles stay raw without one.
+    settings: Option<PathBuf>,
     authority: String,
     secret: String,
     credentials: Mutex<Credentials>,
@@ -93,6 +96,13 @@ pub fn secret(directory: &Path) -> Result<String> {
 }
 impl Web {
     pub fn new(directory: &Path, authority: &str) -> Result<Arc<Self>> {
+        Self::configured(directory, authority, None)
+    }
+    pub fn configured(
+        directory: &Path,
+        authority: &str,
+        settings: Option<PathBuf>,
+    ) -> Result<Arc<Self>> {
         ensure!(
             authority
                 .parse::<std::net::SocketAddr>()?
@@ -102,6 +112,7 @@ impl Web {
         );
         Ok(Arc::new(Self {
             directory: directory.into(),
+            settings,
             authority: authority.into(),
             secret: secret(directory)?,
             credentials: Mutex::new(Credentials {
@@ -369,13 +380,16 @@ fn invalid() -> anyhow::Error {
     QueryError::InvalidRequest.into()
 }
 fn evidence(
-    directory: &Path,
+    web: &Web,
     client: Client,
     operation: &str,
     a: Arguments,
     cancelled: Option<Arc<AtomicBool>>,
 ) -> Result<Value> {
-    let queries = Queries::open(directory)?.cancel_when(cancelled);
+    let mut queries = Queries::open(&web.directory)?.cancel_when(cancelled);
+    if let Some(settings) = &web.settings {
+        queries = queries.with_titles(TitleRules::load(settings));
+    }
     let page = PageRequest {
         cursor: a.cursor,
         limit: a.limit,
@@ -468,8 +482,9 @@ async fn query(
     } else {
         None
     };
-    blocking(state, move |directory| {
-        evidence(directory, Client::Browser, &operation, a, cancelled)
+    let web = state.clone();
+    blocking(state, move |_| {
+        evidence(&web, Client::Browser, &operation, a, cancelled)
     })
     .await
 }
@@ -709,7 +724,7 @@ async fn mcp(State(state): State<Arc<Web>>, headers: HeaderMap, body: Bytes) -> 
                     ensure!(bytes.len() as u64 <= IMAGE_LIMIT, QueryError::LimitExceeded);
                     Ok(json!({"content":[{"type":"text","text":serde_json::to_string(&image.screenshot)?},{"type":"image","mimeType":"image/webp","data":base64::engine::general_purpose::STANDARD.encode(bytes)}]}))
                 } else {
-                    let value = evidence(&state.directory, Client::Mcp, &name, arguments, None)?;
+                    let value = evidence(&state, Client::Mcp, &name, arguments, None)?;
                     Ok(json!({"content":[{"type":"text","text":serde_json::to_string(&value)?}],"structuredContent":value}))
                 }
             }).await {

@@ -30,11 +30,15 @@ impl Queries {
         }
         let old: Cursor = serde_json::from_slice(&decode_cursor(since)?)
             .map_err(|_| QueryError::InvalidRequest)?;
-        let query = format!(
-            "overview:{:?}:{}:{points:?}",
-            resolved.range, resolved.timezone
-        );
-        if old.query != query || old.offset != 0 {
+        let scope = overview::overview_scope(&resolved, points);
+        let query = format!("{scope}:{}", self.analysis_version());
+        // Changed grouping or title rules redo the overview instead of diffing.
+        let policy_changed = old.query != query
+            && old
+                .query
+                .strip_prefix(&scope)
+                .is_some_and(|version| version.starts_with(':'));
+        if (old.query != query && !policy_changed) || old.offset != 0 {
             bail!(QueryError::InvalidRequest);
         }
         let cursor = {
@@ -58,7 +62,7 @@ impl Queries {
                 truncated: false,
             },
         };
-        if old.epoch != current.epoch {
+        if policy_changed || old.epoch != current.epoch {
             return Ok(empty(true));
         }
         if old.observations > current.observations || old.screenshots > current.screenshots {

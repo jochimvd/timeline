@@ -23,7 +23,7 @@ impl Endpoint {
     /// Configuration errors are terminal; binding happens in `step`.
     pub fn new(directory: &Path, address: &str, stop: Arc<AtomicBool>) -> Result<Self> {
         Ok(Self {
-            web: Web::new(directory, address)?,
+            web: Web::configured(directory, address, crate::config::settings_file().ok())?,
             stop,
             server: None,
             retry_at: Instant::now(),

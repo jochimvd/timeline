@@ -206,8 +206,9 @@ impl Queries {
         let _snapshot = self.history.connection.unchecked_transaction()?;
         let cursor = self.cursor(
             format!(
-                "overview:{:?}:{}:{points:?}",
-                resolved.range, resolved.timezone
+                "{}:{}",
+                overview_scope(&resolved, points),
+                self.analysis_version()
             ),
             &page,
         )?;
@@ -303,4 +304,12 @@ impl Queries {
         })?;
         Ok(totals)
     }
+}
+
+/// Overview cursor query without the analysis version.
+pub(super) fn overview_scope(resolved: &ResolvedRange, points: Option<usize>) -> String {
+    format!(
+        "overview:{:?}:{}:{points:?}",
+        resolved.range, resolved.timezone
+    )
 }

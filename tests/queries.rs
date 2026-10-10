@@ -186,6 +186,47 @@ fn grouping_is_replaceable_but_exact_totals_idle_and_originals_are_not() {
 }
 
 #[test]
+fn title_rules_merge_cleaned_titles_but_observations_stay_raw() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = History::open(dir.path()).unwrap();
+    for (wall, title) in [(0, "⠋ Review"), (10, "⠙ Review"), (20, "◑ Review")] {
+        put(
+            &mut h,
+            wall,
+            wall,
+            1,
+            StateChange::Focus,
+            state(Some(title), false),
+        );
+    }
+    put(&mut h, 30, 30, 1, StateChange::Focus, state(None, false));
+    let rules = timeline::titles::TitleRules::parse(
+        "[[title_rules]]\napplication = 'editor'\npattern = '^[\\x{2800}-\\x{28FF}◑]'",
+    )
+    .unwrap();
+    let raw = Queries::open(dir.path()).unwrap();
+    let cleaned = Queries::open(dir.path()).unwrap().with_titles(rules.into());
+    let blocks = |q: &Queries| {
+        q.blocks(Browser, range(0, 30), page(100, None))
+            .unwrap()
+            .items
+    };
+    let (raw_blocks, cleaned_blocks) = (blocks(&raw), blocks(&cleaned));
+    assert_eq!(raw_blocks.len(), 3);
+    assert_eq!(cleaned_blocks.len(), 1);
+    assert_eq!(cleaned_blocks[0].group.title, "Review");
+    assert_eq!(cleaned_blocks[0].elapsed_ms, 30);
+    assert_ne!(cleaned_blocks[0].id, raw_blocks[0].id);
+    let observations = cleaned
+        .observations(Browser, range(0, 30), page(100, None))
+        .unwrap();
+    assert!(matches!(
+        &observations.items[0].evidence,
+        Evidence::State { state, .. } if state.focus.as_ref().unwrap().title == "⠋ Review"
+    ));
+}
+
+#[test]
 fn activity_days_follow_oslo_dst_and_half_open_elapsed_clips_are_additive() {
     let dir = tempfile::tempdir().unwrap();
     let mut h = History::open(dir.path()).unwrap();

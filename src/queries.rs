@@ -6,6 +6,7 @@ use crate::{
     evidence::{Evidence, FocusState, StateChange},
     history::{History, ImageRead, Screenshot, ScreenshotSample},
     recording::Window,
+    titles::TitleRules,
 };
 use anyhow::{Result, bail};
 use chrono::{NaiveDate, TimeZone};
@@ -265,6 +266,7 @@ pub struct Queries {
     history: History,
     timezone: Tz,
     grouping: Box<dyn Grouping>,
+    titles: Arc<TitleRules>,
     cancelled: Option<Arc<AtomicBool>>,
 }
 impl Queries {
@@ -285,8 +287,21 @@ impl Queries {
             history: History::read(directory)?,
             timezone,
             grouping,
+            titles: Default::default(),
             cancelled: None,
         })
+    }
+    /// Cleans focus titles in coverage, blocks and overviews; raw observations stay as recorded.
+    pub fn with_titles(mut self, titles: Arc<TitleRules>) -> Self {
+        self.titles = titles;
+        self
+    }
+    /// Versions block IDs and analysis cursors by grouping and title rules.
+    fn analysis_version(&self) -> String {
+        match self.titles.version() {
+            "" => self.grouping.version().into(),
+            titles => format!("{}+titles-{titles}", self.grouping.version()),
+        }
     }
     pub(crate) fn cancel_when(mut self, cancelled: Option<Arc<AtomicBool>>) -> Self {
         self.cancelled = cancelled;

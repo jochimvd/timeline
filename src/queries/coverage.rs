@@ -54,7 +54,13 @@ impl<'a> Focus<'a> {
                 }
                 self.furthest = self.furthest.max(clipped.end_ms);
                 let recording_boundary = self.recording_boundary()?;
-                visit(interval(&old, &next, clipped, recording_boundary))?;
+                visit(interval(
+                    &old,
+                    &next,
+                    clipped,
+                    recording_boundary,
+                    &self.queries.titles,
+                ))?;
             }
         }
         self.previous = Some(next);
@@ -79,7 +85,7 @@ impl<'a> Focus<'a> {
             .previous
             .take()
             .filter(|o| Some(o.id) == latest && o.unix_ms <= tail.start_ms);
-        match previous.map(|o| (classify(&o.evidence), o)) {
+        match previous.map(|o| (classify(&o.evidence, &self.queries.titles), o)) {
             Some((focus @ FocusCoverage::Gap { .. }, o)) => visit(Coverage {
                 range: tail,
                 segment: Some(o.segment),
@@ -99,10 +105,11 @@ fn interval(
     next: &ScanObservation,
     clipped: Range,
     recording_boundary: i64,
+    titles: &TitleRules,
 ) -> Coverage {
     let continuous = old.segment == next.segment && next.monotonic_ms >= old.monotonic_ms;
     let focus = if continuous {
-        classify(&old.evidence)
+        classify(&old.evidence, titles)
     } else {
         match next.evidence.as_ref() {
             Evidence::Boundary { reason, .. } => FocusCoverage::Gap {
@@ -153,7 +160,7 @@ impl Queries {
         let _permit = self.admit(client)?;
         let _snapshot = self.history.connection.unchecked_transaction()?;
         let cursor = self.cursor(
-            format!("blocks:{range:?}:{}", self.grouping.version()),
+            format!("blocks:{range:?}:{}", self.analysis_version()),
             &page,
         )?;
         let mut output = Pager::new(cursor.clone(), &page);
@@ -172,6 +179,7 @@ impl Queries {
     ) -> Result<()> {
         let mut blocks = Blocks {
             grouping: self.grouping.as_ref(),
+            version: self.analysis_version(),
             range,
             current: None,
         };
@@ -188,6 +196,7 @@ impl Queries {
 
 struct Blocks<'a> {
     grouping: &'a dyn Grouping,
+    version: String,
     range: Range,
     current: Option<Block>,
 }
@@ -212,7 +221,7 @@ impl Blocks<'_> {
         if !compatible {
             self.finish(output)?;
             self.current = Some(Block {
-                id: format!("{}:{segment}:{id}", self.grouping.version()),
+                id: format!("{}:{segment}:{id}", self.version),
                 recording_boundary: coverage.recording_boundary,
                 first_observation: id,
                 last_observation: id,
@@ -258,7 +267,7 @@ pub(super) fn is_boundary(evidence: &Evidence) -> bool {
         }
     )
 }
-fn classify(evidence: &Evidence) -> FocusCoverage {
+fn classify(evidence: &Evidence, titles: &TitleRules) -> FocusCoverage {
     match evidence {
         Evidence::State {
             state:
@@ -294,7 +303,7 @@ fn classify(evidence: &Evidence) -> FocusCoverage {
             ..
         } => match focus {
             Some(window) => FocusCoverage::Focus {
-                window: window.clone(),
+                window: titles.clean(window),
                 idle: *idle,
             },
             None => FocusCoverage::NoFocus { idle: *idle },
