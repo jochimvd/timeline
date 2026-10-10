@@ -370,6 +370,7 @@ async fn bootstrap(State(state): State<Arc<Web>>, Json(input): Json<Bootstrap>) 
 #[serde(deny_unknown_fields)]
 pub struct Arguments {
     date: Option<String>,
+    dates: Option<Dates>,
     range: Option<Range>,
     cursor: Option<String>,
     limit: Option<usize>,
@@ -380,6 +381,13 @@ pub struct Arguments {
     selected_ms: Option<i64>,
     id: Option<i64>,
     max_edge: Option<u32>,
+}
+/// Consecutive activity dates, both inclusive.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Dates {
+    first: String,
+    last: String,
 }
 fn invalid() -> anyhow::Error {
     QueryError::InvalidRequest.into()
@@ -399,12 +407,15 @@ fn evidence(
         cursor: a.cursor,
         limit: a.limit,
     };
+    let date = |date: &str| date.parse().map_err(|_| invalid());
     let selection = || -> Result<Selection> {
-        match (&a.date, a.range) {
-            (Some(date), None) => Ok(Selection::ActivityDate(
-                date.parse().map_err(|_| invalid())?,
-            )),
-            (None, Some(range)) => Ok(Selection::Range(range)),
+        match (&a.date, &a.dates, a.range) {
+            (Some(day), None, None) => Ok(Selection::ActivityDate(date(day)?)),
+            (None, Some(dates), None) => Ok(Selection::ActivityDates {
+                first: date(&dates.first)?,
+                last: date(&dates.last)?,
+            }),
+            (None, None, Some(range)) => Ok(Selection::Range(range)),
             _ => Err(invalid()),
         }
     };
@@ -602,23 +613,29 @@ fn tool_definitions() -> Value {
     let page =
         json!({"cursor":{"type":"string"},"limit":{"type":"integer","minimum":1,"maximum":500}});
     let zone = crate::config::activity_timezone();
+    let dates = json!({"type":"object","description":"Consecutive activity dates, both inclusive, at most 31","properties":{"first":{"type":"string","format":"date"},"last":{"type":"string","format":"date"}},"required":["first","last"],"additionalProperties":false});
     let overview = format!(
-        "Overview of an activity date (04:00 {zone}) or half-open range, at most 31 days. \
-        Page all breakdown rows: category totals (every configured category in order, then \
-        uncategorized as category null), application and exact-title totals (titles carry \
-        their category), then focus and screenshot coverage. Focus includes idle; gaps are \
-        unknown, not task time. `metrics` summarizes the range as in focus_metrics."
+        "Overview of an activity date (04:00 {zone}), consecutive dates or half-open range, at \
+        most 31 days. Page all breakdown rows: category totals (every configured category in \
+        order, then uncategorized as category null), application and exact-title totals \
+        (titles carry their category), then focus and screenshot coverage. Focus includes idle; \
+        gaps are unknown, not task time. `metrics` summarizes the range as in focus_metrics."
     );
     let metrics = format!(
-        "Focus metrics per activity day (04:00 {zone}) of a date or half-open range, at most 31 \
-        days, with each day's focus totals. active_ms is non-idle focus. Context switches count \
-        application (and, with categories, category) changes between consecutive focus within \
-        continuous non-idle evidence; idle, gaps, pause/lock and timing boundaries never count. \
-        Focus stretches are continuous active focus on one category (else application); glances \
-        away under {}s are bridged while they stay within {}% of a stretch. longest_stretch has \
-        a time range to inspect; stretches buckets long >=25 min, medium 10-25, short <10; \
-        hours holds hourly active time and switches. Observed focus patterns only: not task \
-        time and not a productivity judgement.",
+        "Per activity day (04:00 {zone}) of a date, consecutive dates (e.g. a week) or half-open \
+        range, at most 31 days: focus totals, focus by category and by application (focus_ms \
+        includes idle, active_ms excludes it), evidence, and focus metrics. evidence splits the \
+        day into observed time, recording gaps (with reasons) and unknown time up to now; a day \
+        without observed evidence is missing evidence, not zero activity. active_ms is non-idle \
+        focus. Context switches count application (and, with categories, category) changes \
+        between consecutive focus within continuous non-idle evidence; idle, gaps, pause/lock \
+        and timing boundaries never count. Focus stretches are continuous active focus on one \
+        category (else application); glances away under {}s are bridged while they stay within \
+        {}% of a stretch. longest_stretch has a time range to inspect; stretches buckets long \
+        >=25 min, medium 10-25, short <10; hours holds hourly active time and switches. Days add \
+        up except longest_stretch (take the maximum) and rates (recompute from switches and \
+        active_ms). To compare periods, use equal lengths and say where either lacks evidence. \
+        Observed focus patterns only: not task time and not a productivity judgement.",
         crate::queries::BRIEF_INTERRUPTION_MS / 1000,
         crate::queries::MAX_INTERRUPTED_PERCENT,
     );
@@ -637,7 +654,10 @@ fn tool_definitions() -> Value {
             properties.extend(page.as_object().unwrap().clone()); properties.insert("range".into(), range.clone());
         }
         if name == "focus_metrics" { properties.insert("range".into(), range.clone()); }
-        if matches!(name, "overview" | "focus_metrics") { properties.insert("date".into(), json!({"type":"string","format":"date"})); }
+        if matches!(name, "overview" | "focus_metrics") {
+            properties.insert("date".into(), json!({"type":"string","format":"date"}));
+            properties.insert("dates".into(), dates.clone());
+        }
         if name == "screenshots" { properties.insert("monitor".into(), json!({"type":"string"})); }
         if matches!(name, "image" | "observation") { properties.insert("id".into(), json!({"type":"integer"})); }
         if name == "image" { properties.insert("max_edge".into(), json!({"type":"integer","minimum":64,"maximum":4096})); }
@@ -690,7 +710,7 @@ async fn mcp(State(state): State<Arc<Web>>, headers: HeaderMap, body: Bytes) -> 
             else {
                 return rpc_error(id, -32602, "Missing protocolVersion");
             };
-            json!({"protocolVersion":if VERSIONS.contains(&version) {version} else {"2025-11-25"},"capabilities":{"tools":{}},"serverInfo":{"name":"timeline","version":env!("CARGO_PKG_VERSION")},"instructions":"Read metadata first. Focus is not task time; categories are the user's rule-based focus classification, useful hints but not task attribution. Focus metrics describe observed switching and sustained focus, not productivity. Keep ambiguity unassigned and gaps unknown. Do not double count monitors; cite evidence IDs. Tasks and corrections belong in conversation."})
+            json!({"protocolVersion":if VERSIONS.contains(&version) {version} else {"2025-11-25"},"capabilities":{"tools":{}},"serverInfo":{"name":"timeline","version":env!("CARGO_PKG_VERSION")},"instructions":"Read metadata first. Focus is not task time; categories are the user's rule-based focus classification, useful hints but not task attribution. Focus metrics describe observed switching and sustained focus, not productivity. Keep ambiguity unassigned and gaps unknown; a day without observed evidence is missing evidence, not zero activity. Do not double count monitors; cite evidence IDs. Tasks and corrections belong in conversation."})
         }
         "ping" => json!({}),
         "tools/list" => tool_definitions(),

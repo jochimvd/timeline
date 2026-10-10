@@ -508,6 +508,52 @@ async fn browser_and_mcp_share_focus_metrics_per_activity_day() {
     )
     .await;
     assert_eq!(invalid["isError"], true);
+
+    // Consecutive activity dates, as for a week, select whole days.
+    let args = json!({"dates":{"first":"1969-12-31","last":"1970-01-01"}});
+    let span =
+        tool(&app, &bearer, "focus_metrics", args.clone()).await["structuredContent"].clone();
+    assert_eq!(span, browser(&app, &cookie, "focus_metrics", args).await.1);
+    let days = span["days"].as_array().unwrap();
+    assert_eq!(days.len(), 2);
+    let day = days
+        .iter()
+        .find(|day| day["evidence"]["observed_ms"].as_i64() > Some(0))
+        .unwrap();
+    assert_eq!(day["applications"][0]["application"], "editor");
+    assert_eq!(
+        day["applications"][0]["active_ms"],
+        day["metrics"]["active_ms"]
+    );
+    assert_eq!(day["categories"], json!([]), "no categories configured");
+    let width =
+        day["range"]["end_ms"].as_i64().unwrap() - day["range"]["start_ms"].as_i64().unwrap();
+    let evidence = &day["evidence"];
+    assert_eq!(
+        ["observed_ms", "gap_ms", "unknown_ms"]
+            .map(|field| evidence[field].as_i64().unwrap())
+            .iter()
+            .sum::<i64>(),
+        width
+    );
+    for dates in [
+        json!({"first":"1970-01-01","last":"1970-02-01"}),
+        json!({"first":"1970-01-01"}),
+    ] {
+        let response = tool(&app, &bearer, "focus_metrics", json!({ "dates": dates })).await;
+        assert!(
+            response.is_null() || response["isError"] == true,
+            "{response}"
+        );
+    }
+    let both = tool(
+        &app,
+        &bearer,
+        "focus_metrics",
+        json!({"date":"1970-01-01","dates":{"first":"1970-01-01","last":"1970-01-01"}}),
+    )
+    .await;
+    assert_eq!(both["isError"], true, "one selection at a time");
 }
 #[tokio::test]
 async fn selected_images_missing_files_expiry_and_shared_busy_limits() {
