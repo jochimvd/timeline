@@ -414,6 +414,14 @@ impl Queries {
     pub fn thumbnail(&self, client: Client, id: i64) -> Result<RetrievedImage> {
         self.image_format(client, id, crate::tiles::ImageFormat::Thumbnail)
     }
+    /// A lossy rendition at most `max_edge` (64–4096) pixels on its longest edge,
+    /// for clients that cannot use native resolution. The metadata stays original.
+    pub fn preview(&self, client: Client, id: i64, max_edge: u32) -> Result<RetrievedImage> {
+        if !(64..=4096).contains(&max_edge) {
+            bail!(QueryError::InvalidRequest);
+        }
+        self.image_format(client, id, crate::tiles::ImageFormat::Preview(max_edge))
+    }
     fn image_format(
         &self,
         client: Client,

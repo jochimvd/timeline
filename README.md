@@ -110,6 +110,7 @@ own client class rather than accepting it from a request. The service offers:
   flags. Repeated wall times return distinct timing segments.
 - `image`: retrieve the exact screenshot ID and its metadata with a bounded byte
   stream; missing/expired references or files return `QueryError::Unavailable`.
+  `preview` returns a lossy rendition of at most 64–4096 pixels per edge instead.
 
 Activity dates start at 04:00 in the source-configured `Europe/Oslo` timezone.
 Resolved bounds account for DST. Exceptional ambiguous/nonexistent 04:00 boundaries
@@ -342,11 +343,13 @@ most 128 encoded previews / 16 MiB in RAM, with no thumbnail files or database
 records. Each read validates that the screenshot is still retained before using
 the cache and shares existing read admission and reclamation leases. Cold previews
 require tile decoding and resizing; cache hits avoid that work. Full-size viewing,
-CLI, MCP,
-and `/api/image/{id}` exports reconstruct a lossless WebP; a single-region image
+CLI and `/api/image/{id}` exports reconstruct a lossless WebP; a single-region image
 is returned byte-for-byte. Export reconstruction adds on-demand CPU and is
-separate from the browser path. MCP image content is limited to 24 MiB before base64 encoding and
-returns `limit_exceeded` for larger files. Browser metadata is limited to 20,000
+separate from the browser path. MCP `image` returns a quality-80 WebP downscaled to
+at most `max_edge` pixels per edge (default 1920, 64–4096, never upscaled); a
+single-region image within that bound is returned byte-for-byte. Its text content
+keeps the original metadata and capture timestamp. MCP image content is limited to
+24 MiB before base64 encoding and returns `limit_exceeded` for larger files. Browser metadata is limited to 20,000
 rows / 16 MiB per visible range; it asks the user to zoom in on overflow. Current
 monitor images are limited to 96 MiB of declared pixels and 32 MiB of encoded
 bytes per displayed set. Shared decoded tiles and canvas backing stores each

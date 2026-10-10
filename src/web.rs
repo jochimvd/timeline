@@ -30,6 +30,7 @@ use tokio::sync::Semaphore;
 pub const ADDRESS: &str = "127.0.0.1:47831";
 const VERSIONS: &[&str] = &["2025-03-26", "2025-06-18", "2025-11-25"];
 const IMAGE_LIMIT: u64 = 24 * 1024 * 1024;
+const MCP_IMAGE_EDGE: u32 = 1920;
 
 struct Credentials {
     bootstrap: HashMap<String, Instant>,
@@ -367,6 +368,7 @@ pub struct Arguments {
     monitor: Option<String>,
     selected_ms: Option<i64>,
     id: Option<i64>,
+    max_edge: Option<u32>,
 }
 fn invalid() -> anyhow::Error {
     QueryError::InvalidRequest.into()
@@ -532,6 +534,9 @@ async fn image_response(state: Arc<Web>, id: i64, format: crate::tiles::ImageFor
             crate::tiles::ImageFormat::Bundle => queries.tiles(Client::Browser, id)?,
             crate::tiles::ImageFormat::Original => queries.image(Client::Browser, id)?,
             crate::tiles::ImageFormat::Thumbnail => queries.thumbnail(Client::Browser, id)?,
+            crate::tiles::ImageFormat::Preview(edge) => {
+                queries.preview(Client::Browser, id, edge)?
+            }
         };
         Ok::<_, anyhow::Error>((retrieved, permit))
     })
@@ -585,7 +590,7 @@ fn tool_definitions() -> Value {
         ("observations", "Original window observations in a range up to 48 hours. Page before inferring tasks.", vec!["range"]),
         ("observation", "Retrieve one original observation by its stable ID; expired evidence is unavailable.", vec!["id"]),
         ("screenshots", "List screenshot metadata in a range up to 48 hours, optionally by monitor. Retrieve only selected images.", vec!["range"]),
-        ("image", "Retrieve one selected WebP and its actual capture timestamp and monitor. No replacement of expired evidence. Maximum encoded image 24 MiB.", vec!["id"]),
+        ("image", "Retrieve one selected screenshot as a lossy WebP downscaled to at most max_edge pixels on its longest edge (default 1920, never upscaled). The text content carries the original metadata: actual capture timestamp, monitor and native size. No replacement of expired evidence.", vec!["id"]),
     ].into_iter().map(|(name, description, required)| {
         let mut properties = serde_json::Map::new();
         if matches!(name, "overview" | "blocks" | "observations" | "screenshots") {
@@ -594,6 +599,7 @@ fn tool_definitions() -> Value {
         if name == "overview" { properties.insert("date".into(), json!({"type":"string","format":"date"})); }
         if name == "screenshots" { properties.insert("monitor".into(), json!({"type":"string"})); }
         if matches!(name, "image" | "observation") { properties.insert("id".into(), json!({"type":"integer"})); }
+        if name == "image" { properties.insert("max_edge".into(), json!({"type":"integer","minimum":64,"maximum":4096})); }
         json!({"name":name,"description":description,"inputSchema":{"type":"object","properties":properties,"required":required,"additionalProperties":false},"annotations":{"readOnlyHint":true,"destructiveHint":false,"openWorldHint":false}})
     }).collect();
     json!({"tools":tools})
@@ -696,7 +702,8 @@ async fn mcp(State(state): State<Arc<Web>>, headers: HeaderMap, body: Bytes) -> 
             match tokio::task::spawn_blocking(move || -> Result<Value> {
                 let _permit = permit;
                 if name == "image" {
-                    let mut image = Queries::open(&state.directory)?.image(Client::Mcp, arguments.id.ok_or_else(invalid)?)?;
+                    // Model clients downscale large images anyway; send a bounded rendition.
+                    let mut image = Queries::open(&state.directory)?.preview(Client::Mcp, arguments.id.ok_or_else(invalid)?, arguments.max_edge.unwrap_or(MCP_IMAGE_EDGE))?;
                     let mut bytes = Vec::new();
                     image.stream.by_ref().take(IMAGE_LIMIT + 1).read_to_end(&mut bytes)?;
                     ensure!(bytes.len() as u64 <= IMAGE_LIMIT, QueryError::LimitExceeded);

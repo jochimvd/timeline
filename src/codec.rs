@@ -126,12 +126,22 @@ pub(crate) fn decode_into(
 
 /// At most 640 pixels on either edge; no upscaling and no intermediate export.
 pub(crate) fn thumbnail(pixels: &[u8], width: u32, height: u32) -> Result<Vec<u8>> {
+    scaled(pixels, width, height, 640, 1024 * 1024)
+}
+/// Lossy rendition at most `max_edge` pixels on either edge, never upscaled.
+pub(crate) fn scaled(
+    pixels: &[u8],
+    width: u32,
+    height: u32,
+    max_edge: u32,
+    max_bytes: usize,
+) -> Result<Vec<u8>> {
     ensure!(
-        pixels.len() == pixel_bytes(width, height)?,
+        max_edge > 0 && pixels.len() == pixel_bytes(width, height)?,
         "invalid thumbnail pixels"
     );
     let edge = width.max(height);
-    let scale = edge.min(640);
+    let scale = edge.min(max_edge);
     let w = ((width * scale + edge / 2) / edge).max(1);
     let h = ((height * scale + edge / 2) / edge).max(1);
     unsafe extern "C" {
@@ -155,7 +165,7 @@ pub(crate) fn thumbnail(pixels: &[u8], width: u32, height: u32) -> Result<Vec<u8
             &mut output,
         )
     };
-    let result = if size > 0 && size <= 1024 * 1024 && !output.is_null() {
+    let result = if size > 0 && size <= max_bytes && !output.is_null() {
         Ok(unsafe { std::slice::from_raw_parts(output, size) }.to_vec())
     } else {
         Err(anyhow::anyhow!("thumbnail encoding failed"))

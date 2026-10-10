@@ -23,6 +23,8 @@ pub(crate) enum ImageFormat {
     Original,
     Bundle,
     Thumbnail,
+    /// Lossy, at most this many pixels on the longest edge.
+    Preview(u32),
 }
 const PACK_TARGET: u64 = 16 * 1024 * 1024;
 
@@ -426,10 +428,21 @@ impl Tiles {
         match format {
             ImageFormat::Bundle => self.bundle(),
             ImageFormat::Original if single => Ok(self.payloads.pop().unwrap()),
+            // A stored whole-image region within the bound is already a WebP.
+            ImageFormat::Preview(edge) if single && width.max(height) <= edge => {
+                Ok(self.payloads.pop().unwrap())
+            }
             ImageFormat::Original => {
                 codec::encode_bgra(&self.compose(pixels)?, width, height, true)
             }
             ImageFormat::Thumbnail => codec::thumbnail(&self.compose(pixels)?, width, height),
+            ImageFormat::Preview(edge) => codec::scaled(
+                &self.compose(pixels)?,
+                width,
+                height,
+                edge,
+                codec::MAX_ENCODED,
+            ),
         }
     }
     fn bundle(self) -> Result<Vec<u8>> {
