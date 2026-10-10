@@ -3,7 +3,7 @@ use std::{
     collections::VecDeque,
     sync::{Mutex, OnceLock},
 };
-const BYTE_LIMIT: usize = 16 * 1024 * 1024;
+pub(crate) const BYTE_LIMIT: usize = 16 * 1024 * 1024;
 const ENTRY_LIMIT: usize = 128;
 #[derive(Default)]
 struct Cache {

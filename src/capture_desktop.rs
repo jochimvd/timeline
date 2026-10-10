@@ -3,11 +3,12 @@
 use crate::{
     capture::{CaptureRequest, Monitor, PixelBudget, Pixels},
     recording::Recorder,
+    wayland,
 };
 use anyhow::{Context, Result, ensure};
 use std::{
     collections::BTreeMap,
-    os::fd::{AsFd, AsRawFd},
+    os::fd::AsFd,
     time::{Duration, Instant},
 };
 use wayland_client::{
@@ -27,6 +28,7 @@ use wayland_protocols::ext::{
 
 const SESSION_RETRY_INITIAL: Duration = Duration::from_secs(2);
 const SESSION_RETRY_MAX: Duration = Duration::from_secs(30);
+const OUTPUT_LIMIT: usize = 32;
 
 struct SessionRetry {
     at: Option<Instant>,
@@ -135,9 +137,7 @@ impl DesktopCapture {
             cfg!(target_endian = "little"),
             "SHM normalization requires little endian"
         );
-        let connection = Connection::connect_to_env()?;
-        let queue = connection.new_event_queue();
-        connection.display().get_registry(&queue.handle(), ());
+        let (connection, queue) = wayland::connect()?;
         let mut capture = Self {
             connection,
             queue,
@@ -185,49 +185,15 @@ impl DesktopCapture {
             .collect()
     }
     pub fn synchronize(&mut self) -> Result<()> {
-        self.state.synced = false;
-        self.connection.display().sync(&self.queue.handle(), ());
-        let deadline = Instant::now() + Duration::from_millis(500);
-        while !self.state.synced {
-            ensure!(
-                Instant::now() < deadline,
-                "capture synchronization timed out"
-            );
-            self.pump(25)?;
-        }
-        Ok(())
-    }
-    fn pump(&mut self, timeout: i32) -> Result<()> {
-        self.queue.dispatch_pending(&mut self.state)?;
-        self.connection.flush()?;
-        if let Some(guard) = self.queue.prepare_read() {
-            let mut fd = libc::pollfd {
-                fd: self.connection.as_fd().as_raw_fd(),
-                events: libc::POLLIN,
-                revents: 0,
-            };
-            let count = unsafe { libc::poll(&mut fd, 1, timeout) };
-            if count < 0 {
-                let error = std::io::Error::last_os_error();
-                if error.kind() != std::io::ErrorKind::Interrupted {
-                    return Err(error.into());
-                }
-            } else if count > 0 {
-                match guard.read() {
-                    Ok(_) => (),
-                    Err(wayland_client::backend::WaylandError::Io(e))
-                        if e.kind() == std::io::ErrorKind::WouldBlock => {}
-                    Err(e) => return Err(e.into()),
-                }
-            }
-        }
-        self.queue.dispatch_pending(&mut self.state)?;
-        ensure!(!self.state.removed, "capture protocol global removed");
-        ensure!(self.state.outputs.len() <= 32, "too many Wayland outputs");
-        Ok(())
+        wayland::synchronize(
+            &self.connection,
+            &mut self.queue,
+            &mut self.state,
+            "capture",
+        )
     }
     pub fn poll(&mut self) -> Result<Vec<Captured>> {
-        self.pump(0)?;
+        wayland::pump(&self.connection, &mut self.queue, &mut self.state, 0)?;
         self.create_sessions(Instant::now());
         let stamp = crate::daemon::now()?;
         let mut frames = Vec::new();
@@ -363,6 +329,19 @@ impl DesktopCapture {
         Ok(None)
     }
 }
+impl wayland::Protocol for State {
+    fn synced(&mut self) -> &mut bool {
+        &mut self.synced
+    }
+    fn check(&self) -> Result<()> {
+        ensure!(!self.removed, "capture protocol global removed");
+        ensure!(
+            self.outputs.len() <= OUTPUT_LIMIT,
+            "too many Wayland outputs"
+        );
+        Ok(())
+    }
+}
 impl Dispatch<wl_registry::WlRegistry, ()> for State {
     fn event(
         s: &mut Self,
@@ -381,7 +360,7 @@ impl Dispatch<wl_registry::WlRegistry, ()> for State {
                 match interface.as_str() {
                     "wl_output" if version >= 4 => {
                         // Bound allocation even before the next dispatch returns.
-                        if s.outputs.len() >= 32 {
+                        if s.outputs.len() >= OUTPUT_LIMIT {
                             s.removed = true;
                             return;
                         }

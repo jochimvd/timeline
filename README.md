@@ -114,7 +114,9 @@ own client class rather than accepting it from a request. The service offers:
   stream; missing/expired references or files return `QueryError::Unavailable`.
   `preview` returns a lossy rendition of at most 64–4096 pixels per edge instead.
 
-Activity dates start at 04:00 in the source-configured `Europe/Oslo` timezone.
+Activity dates start at 04:00 in the system's local IANA timezone: `TZ` when it
+names one, otherwise the `/etc/localtime` link target, falling back to
+`Europe/Oslo` when neither resolves. The zone is read once per process.
 Resolved bounds account for DST. Exceptional ambiguous/nonexistent 04:00 boundaries
 require an explicit range, using [Chrono's local-time resolution](https://docs.rs/chrono/latest/chrono/offset/enum.LocalResult.html).
 Elapsed durations use monotonic time only within a timing segment. Adjacent clips

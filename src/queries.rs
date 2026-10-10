@@ -271,7 +271,7 @@ impl Queries {
     pub fn open(directory: &Path) -> Result<Self> {
         Self::with_policy(
             directory,
-            crate::config::ACTIVITY_TIMEZONE,
+            crate::config::activity_timezone(),
             Box::new(ExactTitle),
         )
     }
@@ -432,33 +432,13 @@ impl Queries {
             bail!(QueryError::InvalidRequest);
         }
         let permit = self.admit(client)?;
-        let lease = self.history.try_image_lease().map_err(|error| {
-            if error.chain().any(|cause| {
-                cause
-                    .downcast_ref::<std::fs::TryLockError>()
-                    .is_some_and(|e| matches!(e, std::fs::TryLockError::WouldBlock))
-            }) {
-                anyhow::Error::from(QueryError::Busy)
-            } else {
-                error
-            }
-        })?;
+        let lease = self.history.try_image_lease().map_err(lock_busy)?;
         let _snapshot = self.history.connection.unchecked_transaction()?;
         let screenshot = self.screenshot(id)?.ok_or(QueryError::Unavailable)?;
         let image = self
             .history
             .image_admitted(id, permit.global, lease, format)
-            .map_err(|error| {
-                if error.chain().any(|cause| {
-                    cause
-                        .downcast_ref::<std::fs::TryLockError>()
-                        .is_some_and(|e| matches!(e, std::fs::TryLockError::WouldBlock))
-                }) {
-                    anyhow::Error::from(QueryError::Busy)
-                } else {
-                    error
-                }
-            })?
+            .map_err(lock_busy)?
             .ok_or(QueryError::Unavailable)?;
         Ok(RetrievedImage {
             screenshot,
@@ -467,6 +447,20 @@ impl Queries {
                 _mcp: permit.mcp,
             },
         })
+    }
+}
+
+/// A contended image lease means busy, not failure.
+fn lock_busy(error: anyhow::Error) -> anyhow::Error {
+    let contended = error.chain().any(|cause| {
+        cause
+            .downcast_ref::<std::fs::TryLockError>()
+            .is_some_and(|e| matches!(e, std::fs::TryLockError::WouldBlock))
+    });
+    if contended {
+        QueryError::Busy.into()
+    } else {
+        error
     }
 }
 

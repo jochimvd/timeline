@@ -136,6 +136,16 @@ fn fixture(path: &std::path::Path) {
     recorder.apply(Input::Pause, stamp(6000)).unwrap();
     drop(recorder);
 }
+fn day_start(zone: &str, date: &str, offset: u64) -> i64 {
+    use chrono::TimeZone;
+    let date = date.parse::<chrono::NaiveDate>().unwrap() + chrono::Days::new(offset);
+    let zone: chrono_tz::Tz = zone.parse().unwrap();
+    let local = date.and_hms_opt(4, 0, 0).unwrap();
+    zone.from_local_datetime(&local)
+        .single()
+        .unwrap()
+        .timestamp_millis()
+}
 #[tokio::test]
 async fn browser_resolves_activity_day_boundaries_without_loading_evidence() {
     let dir = tempfile::tempdir().unwrap();
@@ -143,18 +153,16 @@ async fn browser_resolves_activity_day_boundaries_without_loading_evidence() {
     let web = Web::new(dir.path(), HOST).unwrap();
     let app = web.router();
     let cookie = session(&app, &web).await;
-    // Activity days start at 04:00, so the day before each clock change
-    // contains the transition. These dates have no recorded evidence.
-    for (date, hours) in [("2026-03-28", 23), ("2026-10-24", 25)] {
+    // The browser resolves days in the host's activity timezone; Oslo DST
+    // lengths are pinned in tests/queries.rs. These dates have no evidence.
+    let zone = timeline::config::activity_timezone();
+    for date in ["2026-03-28", "2026-10-24"] {
         let (status, resolved) =
             browser(&app, &cookie, "resolve_range", json!({"date": date})).await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(resolved["timezone"], "Europe/Oslo");
-        assert_eq!(
-            resolved["range"]["end_ms"].as_i64().unwrap()
-                - resolved["range"]["start_ms"].as_i64().unwrap(),
-            hours * 3_600_000
-        );
+        assert_eq!(resolved["timezone"], zone);
+        assert_eq!(resolved["range"]["start_ms"], day_start(zone, date, 0));
+        assert_eq!(resolved["range"]["end_ms"], day_start(zone, date, 1));
         assert!(resolved.get("breakdown").is_none());
     }
     for args in [

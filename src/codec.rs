@@ -2,9 +2,11 @@
 use anyhow::{Result, ensure};
 
 pub const MAX_ENCODED: usize = 64 * 1024 * 1024;
+/// Largest WebP edge in pixels.
+pub const MAX_DIMENSION: u32 = 16383;
 pub fn pixel_bytes(width: u32, height: u32) -> Result<usize> {
     ensure!(
-        width > 0 && height > 0 && width <= 16383 && height <= 16383,
+        width > 0 && height > 0 && width <= MAX_DIMENSION && height <= MAX_DIMENSION,
         "invalid image dimensions"
     );
     let bytes = u64::from(width) * u64::from(height) * 4;

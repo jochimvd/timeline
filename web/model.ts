@@ -34,7 +34,7 @@ const activityFormatters = new Map<string, Intl.DateTimeFormat>();
 /** All asynchronous transitions publish complete view state; views never manage requests. */
 export function createTimelineApp() {
   let view: View = {
-    date: "", timezone: "Europe/Oslo", zoom: "1", layout: "grid",
+    date: "", timezone: Intl.DateTimeFormat().resolvedOptions().timeZone, zoom: "1", layout: "grid",
     navigationBusy: false, selected: 0, dayLoading: true, rangeLoading: false,
     evidenceLoading: false, blocks: [], rows: [], focus: [], shots: [], frames: null,
     hoverEvidence: { time: null, focus: [], frames: null, error: "", loading: false },

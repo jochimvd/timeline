@@ -11,6 +11,7 @@ mod storage;
 mod thumbnails;
 mod tile_map;
 mod tiles;
+mod wayland;
 
 mod image_worker;
 
