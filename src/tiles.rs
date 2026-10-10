@@ -8,7 +8,7 @@ use anyhow::{Context, Result, ensure};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::Serialize;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs::{self, File, OpenOptions},
     io::{Read, Seek, SeekFrom, Write},
     os::unix::fs::{OpenOptionsExt, PermissionsExt},
@@ -185,14 +185,20 @@ impl PreparedImage {
             return Ok(name);
         }
         let mut map = Vec::with_capacity(self.tiles.len() * 8);
+        let mut insert = tx.prepare_cached("INSERT OR IGNORE INTO tiles(fingerprint,pack,offset,length,width,height,checksum) VALUES (?1,?2,?3,?4,?5,?6,?7)")?;
+        let mut reference =
+            tx.prepare_cached("UPDATE tiles SET refs=refs+1 WHERE fingerprint=?1 RETURNING id")?;
         for tile in &self.tiles {
-            tx.execute("INSERT OR IGNORE INTO tiles(fingerprint,pack,offset,length,width,height,checksum) VALUES (?1,?2,?3,?4,?5,?6,?7)",
-                params![tile.fingerprint,tile.pack,i64::try_from(tile.offset)?,i64::try_from(tile.length)?,tile.width,tile.height,tile.checksum])?;
-            let id: i64 = tx.query_row(
-                "UPDATE tiles SET refs=refs+1 WHERE fingerprint=?1 RETURNING id",
-                [&tile.fingerprint],
-                |r| r.get(0),
-            )?;
+            insert.execute(params![
+                tile.fingerprint,
+                tile.pack,
+                i64::try_from(tile.offset)?,
+                i64::try_from(tile.length)?,
+                tile.width,
+                tile.height,
+                tile.checksum
+            ])?;
+            let id: i64 = reference.query_row([&tile.fingerprint], |r| r.get(0))?;
             crate::tile_map::push(&mut map, id)?;
         }
         tx.execute("INSERT INTO images(name,fingerprint,width,height,tile_size,map) VALUES (?1,?2,?3,?4,?5,?6)", params![name,fingerprint,self.width,self.height,self.tile_size,map])?;
@@ -200,37 +206,26 @@ impl PreparedImage {
     }
 }
 
-fn prepare(
-    directory: &Path,
-    width: u32,
-    height: u32,
-    pixels: Option<&[u8]>,
-    encoded: Option<&[u8]>,
-) -> Result<PreparedImage> {
-    codec::pixel_bytes(width, height)?;
-    let lease = History::image_lease(directory)?;
-    let history = History::read(directory)?;
-    let tile_size = if pixels.is_some() {
-        TILE_SIZE
-    } else {
-        width.max(height)
-    };
-    let mut known = HashMap::<Vec<u8>, Tile>::new();
-    let mut order = Vec::new();
-    let mut batch = Vec::new();
-    for y in (0..height).step_by(tile_size as usize) {
-        for x in (0..width).step_by(tile_size as usize) {
-            let (w, h) = (tile_size.min(width - x), tile_size.min(height - y));
-            let mut raw = Vec::new();
-            let mut hash = blake3::Hasher::new();
-            hash.update(if pixels.is_some() {
-                b"timeline-raw-tile-v1"
-            } else {
-                b"timeline-encoded-region-v1"
-            });
-            hash.update(&w.to_le_bytes());
-            hash.update(&h.to_le_bytes());
-            if let Some(pixels) = pixels {
+#[derive(Clone, Copy)]
+enum Source<'a> {
+    /// Native BGRA pixels, cut into `TILE_SIZE` regions and encoded lossy.
+    Pixels(&'a [u8]),
+    /// One already-encoded WebP region covering the whole image.
+    Encoded(&'a [u8]),
+}
+impl Source<'_> {
+    /// Content fingerprint and, for pixels, the region's raw rows.
+    fn region(self, width: u32, x: u32, y: u32, w: u32, h: u32) -> (Vec<u8>, Vec<u8>) {
+        let mut raw = Vec::new();
+        let mut hash = blake3::Hasher::new();
+        hash.update(match self {
+            Source::Pixels(_) => b"timeline-raw-tile-v1",
+            Source::Encoded(_) => b"timeline-encoded-region-v1",
+        });
+        hash.update(&w.to_le_bytes());
+        hash.update(&h.to_le_bytes());
+        match self {
+            Source::Pixels(pixels) => {
                 raw.reserve((w * h * 4) as usize);
                 for row in y..y + h {
                     let start = ((row * width + x) * 4) as usize;
@@ -239,47 +234,90 @@ fn prepare(
                 hash.update(&crate::config::WEBP_QUALITY.to_bits().to_le_bytes());
                 hash.update(&crate::config::WEBP_METHOD.to_le_bytes());
                 hash.update(&raw);
-            } else {
-                hash.update(encoded.unwrap());
             }
-            let fingerprint = hash.finalize().as_bytes().to_vec();
+            Source::Encoded(encoded) => {
+                hash.update(encoded);
+            }
+        }
+        (hash.finalize().as_bytes().to_vec(), raw)
+    }
+    fn encode(self, raw: &[u8], w: u32, h: u32) -> Result<Vec<u8>> {
+        match self {
+            Source::Pixels(_) => codec::encode_bgra(raw, w, h, false),
+            Source::Encoded(encoded) => Ok(encoded.to_vec()),
+        }
+    }
+}
+
+/// New regions accumulate in one batch, appended to a pack only when complete.
+#[derive(Default)]
+struct Batch {
+    bytes: Vec<u8>,
+}
+impl Batch {
+    fn stage(&mut self, fingerprint: Vec<u8>, w: u32, h: u32, data: &[u8]) -> Result<Tile> {
+        ensure!(
+            self.bytes.len() + data.len() <= codec::MAX_ENCODED,
+            "tile batch exceeds encoded budget"
+        );
+        let tile = Tile {
+            fingerprint,
+            pack: String::new(),
+            offset: self.bytes.len() as u64,
+            length: data.len() as u64,
+            width: w,
+            height: h,
+            checksum: blake3::hash(data).as_bytes().to_vec(),
+        };
+        self.bytes.extend_from_slice(data);
+        Ok(tile)
+    }
+}
+
+/// `db` only looks up existing regions; callers may reuse one read connection.
+fn prepare(
+    directory: &Path,
+    db: &Connection,
+    width: u32,
+    height: u32,
+    source: Source<'_>,
+) -> Result<PreparedImage> {
+    codec::pixel_bytes(width, height)?;
+    let lease = History::image_lease(directory)?;
+    let tile_size = match source {
+        Source::Pixels(_) => TILE_SIZE,
+        Source::Encoded(_) => width.max(height),
+    };
+    let mut lookup = db.prepare_cached("SELECT fingerprint,pack,offset,length,width,height,checksum FROM tiles WHERE fingerprint=?1")?;
+    let mut packs = HashSet::<String>::new();
+    let mut known = HashMap::<Vec<u8>, Tile>::new();
+    let mut order = Vec::new();
+    let mut batch = Batch::default();
+    for y in (0..height).step_by(tile_size as usize) {
+        for x in (0..width).step_by(tile_size as usize) {
+            let (w, h) = (tile_size.min(width - x), tile_size.min(height - y));
+            let (fingerprint, raw) = source.region(width, x, y, w, h);
             if !known.contains_key(&fingerprint) {
-                let existing = history.connection.query_row("SELECT fingerprint,pack,offset,length,width,height,checksum FROM tiles WHERE fingerprint=?1", [&fingerprint], tile_row).optional()?;
-                let tile = if let Some(tile) = existing {
-                    ensure!(
-                        pack_path(directory, &tile.pack)?.is_file(),
-                        "retained tile pack missing"
-                    );
-                    tile
-                } else {
-                    let data = if pixels.is_some() {
-                        codec::encode_bgra(&raw, w, h, false)?
-                    } else {
-                        encoded.unwrap().to_vec()
-                    };
-                    ensure!(
-                        batch.len() + data.len() <= codec::MAX_ENCODED,
-                        "tile batch exceeds encoded budget"
-                    );
-                    let tile = Tile {
-                        fingerprint: fingerprint.clone(),
-                        pack: String::new(),
-                        offset: batch.len() as u64,
-                        length: data.len() as u64,
-                        width: w,
-                        height: h,
-                        checksum: blake3::hash(&data).as_bytes().to_vec(),
-                    };
-                    batch.extend_from_slice(&data);
-                    tile
+                let tile = match lookup.query_row([&fingerprint], tile_row).optional()? {
+                    Some(tile) => {
+                        if !packs.contains(&tile.pack) {
+                            ensure!(
+                                pack_path(directory, &tile.pack)?.is_file(),
+                                "retained tile pack missing"
+                            );
+                            packs.insert(tile.pack.clone());
+                        }
+                        tile
+                    }
+                    None => batch.stage(fingerprint.clone(), w, h, &source.encode(&raw, w, h)?)?,
                 };
                 known.insert(fingerprint.clone(), tile);
             }
             order.push(fingerprint);
         }
     }
-    if !batch.is_empty() {
-        let (pack, offset) = append_batch(directory, &batch)?;
+    if !batch.bytes.is_empty() {
+        let (pack, offset) = append_batch(directory, &batch.bytes)?;
         for tile in known.values_mut().filter(|t| t.pack.is_empty()) {
             tile.pack = pack.clone();
             tile.offset += offset;
@@ -364,6 +402,112 @@ struct Bundle {
     map: Vec<usize>,
 }
 
+/// Distinct verified regions of one image and their placement.
+struct Tiles {
+    header: Bundle,
+    payloads: Vec<Vec<u8>>,
+}
+impl Tiles {
+    fn push(&mut self, tile: &Tile, data: Vec<u8>) -> Result<usize> {
+        self.header.tiles.push(BundleTile {
+            key: blake3::Hash::from_bytes(tile.fingerprint.as_slice().try_into()?)
+                .to_hex()
+                .to_string(),
+            width: tile.width,
+            height: tile.height,
+            length: data.len(),
+        });
+        self.payloads.push(data);
+        Ok(self.payloads.len() - 1)
+    }
+    fn render(mut self, format: ImageFormat, pixels: usize) -> Result<Vec<u8>> {
+        let (width, height) = (self.header.width, self.header.height);
+        let single = self.header.map.len() == 1;
+        match format {
+            ImageFormat::Bundle => self.bundle(),
+            ImageFormat::Original if single => Ok(self.payloads.pop().unwrap()),
+            ImageFormat::Original => {
+                codec::encode_bgra(&self.compose(pixels)?, width, height, true)
+            }
+            ImageFormat::Thumbnail => codec::thumbnail(&self.compose(pixels)?, width, height),
+        }
+    }
+    fn bundle(self) -> Result<Vec<u8>> {
+        let json = serde_json::to_vec(&self.header)?;
+        ensure!(json.len() <= 1024 * 1024, "tile header exceeds limit");
+        let total: usize = self.payloads.iter().map(Vec::len).sum();
+        let mut bytes = Vec::with_capacity(4 + json.len() + total);
+        bytes.extend_from_slice(&(json.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(&json);
+        for data in self.payloads {
+            bytes.extend_from_slice(&data);
+        }
+        Ok(bytes)
+    }
+    /// Native BGRA pixels of the whole image.
+    fn compose(&self, pixels: usize) -> Result<Vec<u8>> {
+        let Bundle {
+            width,
+            tile_size,
+            ref map,
+            ref tiles,
+            ..
+        } = self.header;
+        let columns = width.div_ceil(tile_size);
+        let mut raw = vec![0; pixels];
+        for (position, &number) in map.iter().enumerate() {
+            let x = position as u32 % columns * tile_size;
+            let y = position as u32 / columns * tile_size;
+            codec::decode_into(
+                &self.payloads[number],
+                &mut raw[((y * width + x) * 4) as usize..],
+                tiles[number].width,
+                tiles[number].height,
+                width * 4,
+            )?;
+        }
+        Ok(raw)
+    }
+}
+
+/// An open pack file and its length, read once per image.
+struct Pack {
+    file: File,
+    length: u64,
+}
+impl Pack {
+    fn open(directory: &Path, name: &str) -> Result<Option<Self>> {
+        let file = match File::open(pack_path(directory, name)?) {
+            Ok(file) => file,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e.into()),
+        };
+        let length = file.metadata()?.len();
+        Ok(Some(Self { file, length }))
+    }
+    /// One region, verified against its checksum and declared dimensions.
+    fn read(&mut self, tile: &Tile) -> Result<Vec<u8>> {
+        ensure!(
+            tile.offset
+                .checked_add(tile.length)
+                .is_some_and(|end| end <= self.length),
+            "truncated tile pack"
+        );
+        self.file.seek(SeekFrom::Start(tile.offset))?;
+        let mut data = vec![0; tile.length as usize];
+        self.file.read_exact(&mut data)?;
+        ensure!(
+            blake3::hash(&data).as_bytes().as_slice() == tile.checksum,
+            "tile checksum mismatch"
+        );
+        ensure!(
+            codec::dimensions(&data)? == (tile.width, tile.height),
+            "tile dimensions mismatch"
+        );
+        Ok(data)
+    }
+}
+
 impl History {
     pub(crate) fn image_lease(directory: &Path) -> Result<File> {
         let file = File::open(directory.join("images.lock"))?;
@@ -376,8 +520,16 @@ impl History {
         Ok(file)
     }
     pub fn prepare_image(directory: &Path, bytes: &[u8]) -> Result<PreparedImage> {
+        // Validate the whole encoding, not only its header, before storing it.
         let (width, height, _) = codec::decode_bgra(bytes)?;
-        prepare(directory, width, height, None, Some(bytes))
+        let history = History::read(directory)?;
+        prepare(
+            directory,
+            &history.connection,
+            width,
+            height,
+            Source::Encoded(bytes),
+        )
     }
     pub fn prepare_pixels(
         directory: &Path,
@@ -385,11 +537,21 @@ impl History {
         height: u32,
         pixels: &[u8],
     ) -> Result<PreparedImage> {
+        History::read(directory)?.prepare_capture(width, height, pixels)
+    }
+    /// `prepare_pixels` on this reader's connection, reusing its cached statements.
+    pub fn prepare_capture(&self, width: u32, height: u32, pixels: &[u8]) -> Result<PreparedImage> {
         ensure!(
             pixels.len() == codec::pixel_bytes(width, height)?,
             "invalid pixel length"
         );
-        prepare(directory, width, height, Some(pixels), None)
+        prepare(
+            &self.directory,
+            &self.connection,
+            width,
+            height,
+            Source::Pixels(pixels),
+        )
     }
     pub fn image(&self, id: i64) -> Result<Option<ImageRead>> {
         ensure!(id > 0, "invalid screenshot identifier");
@@ -445,23 +607,55 @@ impl History {
                 _slot: slot,
             }));
         }
-        let mut header = Bundle {
-            version: 1,
-            width,
-            height,
-            tile_size,
-            tiles: Vec::new(),
-            map: Vec::new(),
+        let Some(tiles) = self.read_tiles(&ids, width, height, tile_size)? else {
+            return Ok(None);
         };
+        let bytes = tiles.render(format, pixels)?;
+        if format == ImageFormat::Thumbnail {
+            crate::thumbnails::insert(cache_key, &bytes);
+        }
+        Ok(Some(ImageRead {
+            bytes: std::io::Cursor::new(bytes),
+            _lease: lease,
+            _slot: slot,
+        }))
+    }
+
+    /// Reads and verifies each distinct region of a validated map. None if a
+    /// pack file has gone; a missing descriptor or corrupt region is an error.
+    fn read_tiles(
+        &self,
+        ids: &[i64],
+        width: u32,
+        height: u32,
+        tile_size: u32,
+    ) -> Result<Option<Tiles>> {
+        let mut tiles = Tiles {
+            header: Bundle {
+                version: 1,
+                width,
+                height,
+                tile_size,
+                tiles: Vec::new(),
+                map: Vec::new(),
+            },
+            payloads: Vec::new(),
+        };
+        let mut descriptor = self.connection.prepare_cached(
+            "SELECT fingerprint,pack,offset,length,width,height,checksum FROM tiles WHERE id=?1",
+        )?;
         let mut index = HashMap::new();
-        let mut payloads = Vec::<Vec<u8>>::new();
         let mut total = 0;
-        let mut packs = HashMap::<String, File>::new();
+        let mut packs = HashMap::<String, Pack>::new();
+        let columns = width.div_ceil(tile_size);
         for (position, id) in ids.iter().enumerate() {
             let number = if let Some(&number) = index.get(id) {
                 number
             } else {
-                let tile=self.connection.query_row("SELECT fingerprint,pack,offset,length,width,height,checksum FROM tiles WHERE id=?1",[id],tile_row).optional()?.context("missing tile descriptor")?;
+                let tile = descriptor
+                    .query_row([id], tile_row)
+                    .optional()?
+                    .context("missing tile descriptor")?;
                 ensure!(
                     tile.length > 0
                         && tile.length <= codec::MAX_ENCODED as u64
@@ -471,93 +665,26 @@ impl History {
                 total += tile.length as usize;
                 ensure!(total <= codec::MAX_ENCODED, "image tile bytes exceed limit");
                 if !packs.contains_key(&tile.pack) {
-                    let file = match File::open(pack_path(&self.directory, &tile.pack)?) {
-                        Ok(f) => f,
-                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-                        Err(e) => return Err(e.into()),
+                    let Some(pack) = Pack::open(&self.directory, &tile.pack)? else {
+                        return Ok(None);
                     };
-                    packs.insert(tile.pack.clone(), file);
+                    packs.insert(tile.pack.clone(), pack);
                 }
-                let file = packs.get_mut(&tile.pack).unwrap();
-                ensure!(
-                    tile.offset
-                        .checked_add(tile.length)
-                        .is_some_and(|end| file.metadata().is_ok_and(|m| end <= m.len())),
-                    "truncated tile pack"
-                );
-                file.seek(SeekFrom::Start(tile.offset))?;
-                let mut data = vec![0; tile.length as usize];
-                file.read_exact(&mut data)?;
-                ensure!(
-                    blake3::hash(&data).as_bytes().as_slice() == tile.checksum,
-                    "tile checksum mismatch"
-                );
-                ensure!(
-                    codec::dimensions(&data)? == (tile.width, tile.height),
-                    "tile dimensions mismatch"
-                );
-                let number = payloads.len();
-                header.tiles.push(BundleTile {
-                    key: blake3::Hash::from_bytes(tile.fingerprint.as_slice().try_into()?)
-                        .to_hex()
-                        .to_string(),
-                    width: tile.width,
-                    height: tile.height,
-                    length: data.len(),
-                });
-                payloads.push(data);
+                let data = packs.get_mut(&tile.pack).unwrap().read(&tile)?;
+                let number = tiles.push(&tile, data)?;
                 index.insert(id, number);
                 number
             };
             let x = position as u32 % columns * tile_size;
             let y = position as u32 / columns * tile_size;
+            let tile = &tiles.header.tiles[number];
             ensure!(
-                (header.tiles[number].width, header.tiles[number].height)
-                    == (tile_size.min(width - x), tile_size.min(height - y)),
+                (tile.width, tile.height) == (tile_size.min(width - x), tile_size.min(height - y)),
                 "tile dimensions do not fit map"
             );
-            header.map.push(number);
+            tiles.header.map.push(number);
         }
-        let bytes = if format == ImageFormat::Bundle {
-            let json = serde_json::to_vec(&header)?;
-            ensure!(json.len() <= 1024 * 1024, "tile header exceeds limit");
-            let mut bytes = Vec::with_capacity(4 + json.len() + total);
-            bytes.extend_from_slice(&(json.len() as u32).to_le_bytes());
-            bytes.extend_from_slice(&json);
-            for data in payloads {
-                bytes.extend_from_slice(&data);
-            }
-            bytes
-        } else if ids.len() == 1 && format == ImageFormat::Original {
-            payloads.pop().unwrap()
-        } else {
-            let mut raw = vec![0; pixels];
-            for (position, &number) in header.map.iter().enumerate() {
-                let x = position as u32 % columns * tile_size;
-                let y = position as u32 / columns * tile_size;
-                let tile = &header.tiles[number];
-                codec::decode_into(
-                    &payloads[number],
-                    &mut raw[((y * width + x) * 4) as usize..],
-                    tile.width,
-                    tile.height,
-                    width * 4,
-                )?;
-            }
-            if format == ImageFormat::Thumbnail {
-                codec::thumbnail(&raw, width, height)?
-            } else {
-                codec::encode_bgra(&raw, width, height, true)?
-            }
-        };
-        if format == ImageFormat::Thumbnail {
-            crate::thumbnails::insert(cache_key, &bytes);
-        }
-        Ok(Some(ImageRead {
-            bytes: std::io::Cursor::new(bytes),
-            _lease: lease,
-            _slot: slot,
-        }))
+        Ok(Some(tiles))
     }
 
     pub(crate) fn reclaim_images(&self, stop: &AtomicBool) -> Result<bool> {
