@@ -28,6 +28,8 @@ type Status = {
   recording: { manual_paused: boolean; locked: boolean; connected: boolean; screenshot_pressure?: boolean };
   desktop_error?: string; screenshot_error?: string;
 };
+// Intl formatter construction is expensive; activity dates share one per timezone.
+const activityFormatters = new Map<string, Intl.DateTimeFormat>();
 
 /** All asynchronous transitions publish complete view state; views never manage requests. */
 export function createTimelineApp() {
@@ -119,7 +121,7 @@ export function createTimelineApp() {
     const display_points = displayPoints;
     const overview = await query<Overview>("overview", { range, limit: 500, display_points }, signal);
     signal.throwIfAborted();
-    const raw = await pages<Coverage>("overview", { range, display_points }, signal, overview.breakdown);
+    const raw = await pages<Coverage>("overview", { range, display_points }, signal, overview);
     signal.throwIfAborted();
     return { overview, raw };
   }
@@ -340,8 +342,13 @@ export function createTimelineApp() {
     settleRange();
   }
   function activityDate(ms: number) {
-    const parts = new Intl.DateTimeFormat("en-CA", { timeZone: view.timezone,
-      year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", hourCycle: "h23" }).formatToParts(ms);
+    let formatter = activityFormatters.get(view.timezone);
+    if (!formatter) {
+      formatter = new Intl.DateTimeFormat("en-CA", { timeZone: view.timezone,
+        year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", hourCycle: "h23" });
+      activityFormatters.set(view.timezone, formatter);
+    }
+    const parts = formatter.formatToParts(ms);
     const part = (type: string) => parts.find(part => part.type === type)!.value;
     const date = new Date(`${part("year")}-${part("month")}-${part("day")}T12:00:00Z`);
     if (Number(part("hour")) < 4) date.setUTCDate(date.getUTCDate() - 1);

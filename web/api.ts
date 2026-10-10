@@ -1,5 +1,7 @@
 import type { Page, Overview } from "./types";
 const tabId = crypto.randomUUID();
+// Received JSON length per decoded response; bounds pagination without re-serializing.
+const responseLength = new WeakMap<object, number>();
 export async function request<T = unknown>(
   path: string,
   body?: unknown,
@@ -27,7 +29,10 @@ export async function request<T = unknown>(
         : reason,
     );
   }
-  return response.json();
+  const text = await response.text();
+  const value = JSON.parse(text);
+  if (value !== null && typeof value === "object") responseLength.set(value, text.length);
+  return value;
 }
 export async function query<T>(
   operation: string,
@@ -48,30 +53,31 @@ export async function query<T>(
     }
   }
 }
+/** All items of a listing, or of an overview's breakdown, from its first response. */
 export async function pages<T>(
   operation: string,
   args: object,
   signal: AbortSignal,
-  first?: Page<T>,
+  first?: Page<T> | Overview,
 ): Promise<T[]> {
-  let page =
+  let response =
       first ||
       (await query<Page<T>>(operation, { ...args, limit: 500 }, signal)),
     result: T[] = [],
-    bytes = 0;
+    length = 0;
   for (;;) {
-    bytes += new TextEncoder().encode(JSON.stringify(page)).byteLength;
-    if (bytes > 16 * 1024 * 1024 || result.length + page.items.length > 20000)
+    const page = "breakdown" in response ? (response.breakdown as Page<T>) : response;
+    length += responseLength.get(response) ?? 0;
+    if (length > 16 * 1024 * 1024 || result.length + page.items.length > 20000)
       throw new Error(
         "Visible range exceeds display limit. Zoom in to inspect it.",
       );
     result.push(...page.items);
     if (!page.next_cursor) return result;
-    const next = await query<Page<T> | Overview>(
+    response = await query<Page<T> | Overview>(
       operation,
       { ...args, limit: 500, cursor: page.next_cursor },
       signal,
     );
-    page = "breakdown" in next ? (next.breakdown as Page<T>) : next;
   }
 }
