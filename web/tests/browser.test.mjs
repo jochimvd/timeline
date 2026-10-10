@@ -8,6 +8,17 @@ import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { chromium } from "@playwright/test";
 
+/** The fixture embeds web assets at compile time. Cargo can consider a fixture
+ *  built from other sources fresh (for example after building another checkout
+ *  into the same target directory), which would test an old UI; fail clearly. */
+async function assertServesCheckout(url) {
+  for (const asset of ["app.js", "style.css"]) {
+    const served = await (await fetch(new URL("/" + asset, url))).text();
+    assert.ok(served === await readFile("web/" + asset, "utf8"),
+      `the fixture serves a stale web/${asset}; rebuild it with \`touch web/${asset} && cargo build --example web_fixture\``);
+  }
+}
+
 test("checked-in JavaScript matches Svelte and TypeScript", async () => {
   const dir = await mkdtemp(join(tmpdir(), "timeline-ts-"));
   try {
@@ -36,6 +47,7 @@ test("bundled browser with real history, calendar, lanes, breakdown, monitors an
         reject(new Error(`Fixture exited ${code}`)),
       );
     });
+    await assertServesCheckout(url);
     const context = await browser.newContext({
       viewport: { width: 1440, height: 1000 },
     });
@@ -764,6 +776,7 @@ test("week and month views summarize days, compare honestly and drill into the d
       lines.once("line", resolve);
       fixture.once("exit", (code) => reject(new Error(`Fixture exited ${code}`)));
     });
+    await assertServesCheckout(url);
     const page = await (await browser.newContext({ viewport: { width: 1440, height: 1000 } })).newPage();
     const errors = [];
     page.on("pageerror", (e) => errors.push(e.message));
