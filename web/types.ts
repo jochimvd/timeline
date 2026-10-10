@@ -80,11 +80,14 @@ export type OverviewUpdates = {
   changes: Page<{ remove: boolean; row: Coverage }>;
 };
 
-/** A configured category's legend entry, from overview `category` rows. */
-export type CategoryRow = Coverage & { kind: "category"; category: string | null; elapsed_ms: number; percent_of_focus: number };
+/** A configured category's legend entry, from overview `category` rows in tree
+ *  order. `elapsed_ms` includes subcategories; `own_ms` is the category's own matches. */
+export type CategoryRow = Coverage & { kind: "category"; category: string | null; parent: string | null; depth: number;
+  elapsed_ms: number; own_ms: number; percent_of_focus: number };
 export type CategoryRule = { application?: string; title?: string };
 export type CategoryList = {
-  categories: { name: string; color: string | null; palette: number | null; rules: CategoryRule[] }[];
+  /** In tree order: each category followed by its subcategories. */
+  categories: { name: string; parent: string | null; depth: number; color: string | null; palette: number | null; rules: CategoryRule[] }[];
   problem: string | null;
 };
 

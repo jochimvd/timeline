@@ -1027,6 +1027,17 @@ body:has(#enlarged[open]) {
 .focus-ranking li {
   padding: var(--space-2) var(--space-1);
 }
+/* The category tree is as long as the configuration; show it whole. */
+#categories {
+  max-height: none;
+}
+/* Subcategories indent under their parent with a guide line. */
+.focus-ranking li.nested,
+.category-rules li.nested {
+  margin-left: calc((var(--depth) - 1) * var(--space-4) + var(--space-2));
+  padding-left: var(--space-3);
+  border-left: 1px solid var(--border);
+}
 .focus-ranking li.zero {
   color: var(--text-muted);
 }
@@ -1094,10 +1105,10 @@ body:has(#enlarged[open]) {
 .breakdown-details[open] summary {
   margin-bottom: var(--space-3);
 }
+/* One column, so subcategories read beneath their parent. */
 .category-rules {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(min(100%, 280px), 1fr));
-  gap: var(--space-3) var(--space-6);
+  gap: var(--space-3);
   margin: 0;
   padding: 0;
   list-style: none;

@@ -40,6 +40,12 @@ application = "Browser"
 name = "Communication"
 [[categories.rules]]
 application = "Chat"
+
+[[categories]]
+name = "Mail"
+parent = "Communication"
+[[categories.rules]]
+application = "Mail"
 "##;
 
 /// Git for this process and its fixture repositories: a temporary global
@@ -263,12 +269,16 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-const DEMO_CATEGORIES: &str = r#"
+const DEMO_CATEGORIES: &str = r##"
 [[title_rules]]
 pattern = '^[\x{2800}-\x{28FF}✳]\s+'
 
 [[categories]]
+name = "Projects"
+
+[[categories]]
 name = "Timeline"
+parent = "Projects"
 [[categories.rules]]
 application = "code"
 title = '(?i)timeline'
@@ -280,16 +290,8 @@ application = "firefox"
 title = 'localhost:47831|timeline'
 
 [[categories]]
-name = "Communication"
-[[categories.rules]]
-application = "Slack"
-[[categories.rules]]
-application = "thunderbird"
-[[categories.rules]]
-application = "zoom"
-
-[[categories]]
 name = "Writing"
+parent = "Projects"
 [[categories.rules]]
 application = "obsidian"
 [[categories.rules]]
@@ -297,10 +299,28 @@ application = "code"
 title = 'notes'
 
 [[categories]]
+name = "Communication"
+[[categories.rules]]
+application = "thunderbird"
+
+[[categories]]
+name = "Chat"
+parent = "Communication"
+color = "#c45ae0"
+[[categories.rules]]
+application = "Slack"
+
+[[categories]]
+name = "Meetings"
+parent = "Communication"
+[[categories.rules]]
+application = "zoom"
+
+[[categories]]
 name = "Browsing"
 [[categories.rules]]
 application = "firefox"
-"#;
+"##;
 
 /// Three weeks of activity days ending today: weekdays 09:00–17:30 local with
 /// lunch pauses, short weekend mornings, idle periods, brief glances at chat,

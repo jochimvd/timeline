@@ -2,8 +2,9 @@
   import { query } from "./api";
   import FocusPatterns from "./FocusPatterns.svelte";
   import StatTile from "./StatTile.svelte";
+  import { categoryLabel, categoryNodes, categorySwatches } from "./categories";
   import { byRepository, commitCount, repositoryLabel } from "./commits";
-  import { applicationSwatch, captureTime, categorySwatch, clockRange, duration, swatchStyle, time, UNCATEGORIZED, type Swatch } from "./format";
+  import { applicationSwatch, captureTime, clockRange, duration, swatchStyle, time, UNCATEGORIZED, type Swatch } from "./format";
   import { plural } from "./metrics";
   import type { CategoryList, CategoryRow, CommitList, Coverage, FocusMetrics, FocusSubject, Overview, Range } from "./types";
   let { rows, categories, totals, metrics, commits, range, timezone, settingsPath, loading, onreveal, onselect }: {
@@ -13,8 +14,9 @@
     /** Selects a moment, such as a commit, on the timeline. */
     onselect: (ms: number) => void;
   } = $props();
-  /** One ranked row: a name, optional context line, its focus share and mark color. */
-  type Entry = { key: string; name: string; detail?: string; elapsed_ms: number; percent: number; swatch: Swatch };
+  /** One ranked row: a name, optional context line, its focus share and mark
+   *  color, and its nesting level in the category tree. */
+  type Entry = { key: string; name: string; detail?: string; elapsed_ms: number; percent: number; swatch: Swatch; depth?: number };
   const ranked = (kind: string) => rows.filter(row => row.kind === kind)
     .sort((a, b) => b.elapsed_ms! - a.elapsed_ms!);
   const applications = $derived(ranked("application").map((row): Entry => ({
@@ -26,18 +28,32 @@
     detail: row.application + (row.category ? " · " + row.category : ""), elapsed_ms: row.elapsed_ms!,
     percent: row.percent_of_focus!, swatch: applicationSwatch(row.application!),
   })));
-  const configured = $derived(categories.some(row => row.category !== null));
-  const categoryEntries = $derived(categories.map((row): Entry => ({
+  const nodes = $derived(categoryNodes(categories));
+  const configured = $derived(nodes.length > 0);
+  const swatchOf = $derived(categorySwatches(nodes));
+  const entry = (row: CategoryRow): Entry => ({
     key: row.category ?? "", name: row.category ?? UNCATEGORIZED, elapsed_ms: row.elapsed_ms,
-    percent: row.percent_of_focus, swatch: categorySwatch(row),
-  })));
-  // Configured categories by time, with the uncategorized remainder last.
-  const composition = $derived(categoryEntries.filter(entry => entry.elapsed_ms > 0)
-    .sort((a, b) => Number(a.key === "") - Number(b.key === "")));
-  const categorizedPercent = $derived(categories.filter(row => row.category !== null)
+    percent: row.percent_of_focus, swatch: swatchOf(row.category), depth: row.depth,
+    // A parent's own rules catch what its subcategories don't.
+    detail: row.own_ms > 0 && row.own_ms < row.elapsed_ms ? `${duration(row.own_ms)} not in a subcategory` : undefined,
+  });
+  /** The category tree, siblings by time and uncategorized focus last. */
+  const categoryEntries = $derived.by(() => {
+    const children = new Map<string | null, CategoryRow[]>();
+    for (const row of categories) children.set(row.parent, [...children.get(row.parent) ?? [], row]);
+    const rank = (rows: CategoryRow[]) => [...rows].sort((a, b) =>
+      Number(a.category === null) - Number(b.category === null) || b.elapsed_ms - a.elapsed_ms);
+    const walk = (rows: CategoryRow[]): Entry[] =>
+      rank(rows).flatMap(row => [entry(row), ...(row.category === null ? [] : walk(children.get(row.category) ?? []))]);
+    return walk(children.get(null) ?? []);
+  });
+  // Top-level categories by time, with the uncategorized remainder last.
+  const composition = $derived(categoryEntries.filter(entry => entry.depth === 0 && entry.elapsed_ms > 0));
+  const categorizedPercent = $derived(categories.filter(row => row.category !== null && row.depth === 0)
     .reduce((sum, row) => sum + row.percent_of_focus, 0));
   const subjectSwatch = (subject: FocusSubject) => subject.kind === "category"
-    ? categorySwatch(categories.find(row => row.category === subject.name)) : applicationSwatch(subject.name);
+    ? swatchOf(subject.name) : applicationSwatch(subject.name);
+  const subjectName = (subject: FocusSubject) => subject.kind === "category" ? categoryLabel(nodes, subject.name) : subject.name;
   const longest = $derived(metrics?.longest_stretch ?? null);
   const commitRepositories = $derived(commits ? byRepository(commits.commits).length : 0);
   const longShare = $derived(metrics && metrics.active_ms > 0 ? 100 * metrics.stretches.long.elapsed_ms / metrics.active_ms : 0);
@@ -74,7 +90,7 @@
 {#snippet ranking(items: Entry[], id: string)}
   <ol {id} class="focus-ranking">
     {#each items as entry (entry.key)}
-      <li class:zero={entry.elapsed_ms === 0}>
+      <li class:zero={entry.elapsed_ms === 0} class:nested={!!entry.depth} style:--depth={entry.depth ?? 0}>
         <div class="focus-row">
           <span class="focus-name">
             <span class="app-dot" style:background={entry.swatch.fill} aria-hidden="true"></span>
@@ -110,7 +126,7 @@
           {longest ? duration(longest.elapsed_ms) : "—"}
           {#snippet detail()}
             {#if longest}
-              <span class="category-tag"><span class="swatch" style={swatchStyle(subjectSwatch(longest.subject))}></span>{longest.subject.name}</span>
+              <span class="category-tag"><span class="swatch" style={swatchStyle(subjectSwatch(longest.subject))}></span>{subjectName(longest.subject)}</span>
               {` · ${clockRange(longest.range, timezone)}`}{#if longest.interruptions}{` · ${plural(longest.interruptions, "brief interruption")}`}{/if}
             {:else}No active focus{/if}
           {/snippet}
@@ -173,12 +189,12 @@
     {/if}
     {#if configured}
       <details class="breakdown-details" bind:open={rulesOpen}>
-        <summary>Category rules <span class="muted">· first match wins</span></summary>
+        <summary>Category rules <span class="muted">· first match in file order wins, at any level</span></summary>
         {#if list}
           <ol class="category-rules" id="category-rules">
             {#each list.categories as category (category.name)}
-              <li>
-                <span class="category-tag"><span class="swatch" style={swatchStyle(categorySwatch(category))}></span>{category.name}</span>
+              <li class:nested={category.depth > 0} style:--depth={category.depth}>
+                <span class="category-tag"><span class="swatch" style={swatchStyle(swatchOf(category.name))}></span>{category.name}</span>
                 <ul>
                   {#each category.rules as rule}
                     <li>{#if rule.application}<code>{rule.application}</code>{/if}{#if rule.application && rule.title}{" with "}{/if}{#if rule.title}{"title ~ "}<code>{rule.title}</code>{/if}</li>

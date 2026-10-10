@@ -24,7 +24,7 @@ export type View = {
   metrics?: FocusMetrics;
   /** A range the user asked to see on the timeline, such as the longest stretch. */
   highlight: Range | null;
-  /** Configured categories plus uncategorized focus, most time first. */
+  /** Configured categories in tree order, then uncategorized focus. */
   categories: CategoryRow[];
   /** The user's git commits in the loaded range, swapped together with its rows. */
   commits: CommitList | null;
@@ -123,8 +123,8 @@ export function createTimelineApp() {
       } else blocks.push({ id: "display:" + row.range.start_ms + ":" + blocks.length, range: { ...row.range }, group, category, mixed: row.mixed, idle_ms: 0 });
       previousCoverage = row;
     }
-    const categories = (rows.filter(row => row.kind === "category") as CategoryRow[])
-      .sort((a, b) => b.elapsed_ms - a.elapsed_ms || Number(a.category === null) - Number(b.category === null));
+    // In tree order, uncategorized last; views rank them as they need.
+    const categories = rows.filter(row => row.kind === "category") as CategoryRow[];
     patch({ ...transition, rows, blocks, categories, totals, metrics, loadedRange: range, rangeLoading: false,
       message: blocks.length ? "" : "No recorded focus in this range. Coverage and screenshots may differ." });
   }

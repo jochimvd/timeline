@@ -514,8 +514,11 @@ scrubbing, expandable application or category lanes, focus and screenshot
 coverage, a date picker, zoom/panning, visual category/application/exact-title
 breakdowns, monitor layouts, and image enlargement. Breakdown totals follow the
 visible range. With categories configured, "Color by" switches timeline fills,
-labels and lanes between applications and categories (remembered per browser),
-the breakdown adds a category composition bar and ranking, and a collapsed
+labels and lanes between applications, top-level categories and, once any
+category is nested, subcategories (remembered per browser). Subcategories that
+carry their parent's color are drawn in distinct shades of it. The breakdown adds
+a composition bar of top-level categories and the category tree ranked by time
+within each level, and a collapsed
 "Category rules" panel lists the active definitions. The focus summary leads with
 stat tiles for recorded and active focus, context switches per active hour, the
 longest focus stretch ("Show on timeline" marks it, selects its start and moves
@@ -678,7 +681,8 @@ state from `web/period.ts`, which loads a period and its comparison, and
 `RepositoryDetails.svelte` shows where commits come from. The day view (`DayView.svelte`)
 combines `Timeline.svelte`, `EvidenceViewer.svelte` and `Breakdown.svelte` (with
 `FocusPatterns.svelte`); stat tiles share `StatTile.svelte` and the remembered
-"Color by" choice lives in `web/preferences.ts`. `web/metrics.ts` holds the
+"Color by" choice lives in `web/preferences.ts`, the category tree helpers in
+`web/categories.ts`. `web/metrics.ts` holds the
 focus-metric scales and labels and `web/dates.ts` activity-date arithmetic.
 `web/model.ts` owns day state, request cancellation and hover scheduling;
 `web/images.ts` owns tile decoding, reuse and bitmap cleanup;

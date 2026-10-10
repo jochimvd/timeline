@@ -197,6 +197,9 @@ test("bundled browser with real history, calendar, lanes, breakdown, monitors an
     // Categories come from the fixture's settings file: all recorded focus is Planning.
     assert.match(await page.locator("#categories li").first().innerText(), /Planning[\s\S]*100\.0%/);
     assert.match(await page.locator("#categories").innerText(), /Research[\s\S]*Communication/);
+    assert.equal(await page.locator("#categories li.nested").innerText().then(text => text.split("\n")[0]), "Mail",
+      "subcategories follow their parent, indented");
+    assert.equal(await page.locator("#color-by label", { hasText: "Subcategory" }).count(), 1);
     assert.match(await page.locator("#categories-heading").innerText(), /100% categorized/);
     // Focus metrics: one uninterrupted hour on Planning, with no switches.
     assert.match(await page.locator("#switch-rate").innerText(), /0 per active hour[\s\S]*0 application switches · 0\/h between categories/);
@@ -208,7 +211,7 @@ test("bundled browser with real history, calendar, lanes, breakdown, monitors an
     await page.locator("#breakdown summary", { hasText: "Switches by hour" }).click();
     assert.match(await page.locator("#hourly-switches tbody").innerText(), /04:00–05:00\s+1h\s+0\s+0/);
     assert.match(await page.locator("#titles").innerText(), /Editor · Planning/);
-    await page.locator("#color-by label", { hasText: "Category" }).click();
+    await page.locator("#color-by label", { hasText: /^Category$/ }).click();
     assert.match(await page.locator("#lanes").innerText(), /Category lanes/);
     assert.equal(await page.locator("#category-legend").innerText(), "Planning");
     const categoryBlock = page.locator("#timeline .block").first();
@@ -218,7 +221,7 @@ test("bundled browser with real history, calendar, lanes, breakdown, monitors an
     await page.locator("#color-by label", { hasText: "Application" }).click();
     assert.match(await page.locator("#timeline .block").first().innerText(), /Editor/);
     await page.locator(".breakdown-details", { hasText: "Category rules" }).locator("summary").click();
-    await page.waitForFunction(() => document.querySelectorAll("#category-rules > li").length === 3);
+    await page.waitForFunction(() => document.querySelectorAll("#category-rules > li").length === 4);
     assert.match(await page.locator("#category-rules").innerText(), /Research[\s\S]*Browser/);
     await page.locator("#longest-stretch button").click();
     await page.waitForFunction(() => document.querySelector("#stretch-highlight")
@@ -851,7 +854,7 @@ test("week and month views summarize days, compare honestly and drill into the d
     const states = await page.locator(".day-column").evaluateAll(columns => columns.map(column => column.className.replace("day-column ", "")));
     assert.deepEqual(states, ["missing", "recorded", "missing today", "future", "future", "future", "future"]);
     assert.match(await page.locator(".day-column").nth(1).getAttribute("aria-label"), /Tue 22 Sept: 1h recorded focus, Editor 1h/);
-    await page.locator("#color-by label", { hasText: "Category" }).click();
+    await page.locator("#color-by label", { hasText: /^Category$/ }).click();
     assert.match(await page.locator(".daily-chart .legend").innerText(), /Planning/);
     assert.match(await page.locator("#subject-comparison").innerText(), /Planning\s+1h/);
     assert.match(await page.locator(".day-column .segment").first().getAttribute("style"), /var\(--series-1\)/,

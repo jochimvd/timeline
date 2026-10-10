@@ -161,7 +161,7 @@ test("selection commits labels with images and preserves displayed evidence on r
   }
 });
 
-test("display blocks carry and split on categories; category totals rank by focus with uncategorized last", async () => {
+test("display blocks carry and split on categories; category rows keep the server's tree order", async () => {
   const original = { fetch: globalThis.fetch, document: globalThis.document, window: globalThis.window };
   globalThis.document = { removeEventListener() {} };
   globalThis.window = { removeEventListener() {} };
@@ -185,7 +185,8 @@ test("display blocks carry and split on categories; category totals rank by focu
     await app.loadDay("2026-09-22");
     assert.deepEqual(view.blocks.map(block => block.category), ["Planning", "Review", null],
       "a category change splits otherwise identical display blocks");
-    assert.deepEqual(view.categories.map(row => row.category), ["Planning", "Review", null, "Unused"]);
+    assert.deepEqual(view.categories.map(row => row.category), ["Unused", null, "Planning", "Review"],
+      "views rank categories themselves, so the tree order survives");
   } finally {
     unsubscribe(); app.dispose(); Object.assign(globalThis, original);
   }

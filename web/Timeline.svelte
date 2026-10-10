@@ -3,11 +3,12 @@
   import SuspenseBoundary from "./SuspenseBoundary.svelte";
   import { onMount } from "svelte";
   import { on } from "svelte/events";
-  import { applicationSwatch, categorySwatch, clock, clockRange, coverageBands, duration, noScreenshot, swatchStyle, time, imageTransform, UNCATEGORIZED, type Swatch } from "./format";
+  import { applicationSwatch, clock, clockRange, coverageBands, duration, noScreenshot, swatchStyle, time, imageTransform, UNCATEGORIZED, type Swatch } from "./format";
   import { hourSwitches, plural, SWITCH_LEVELS, switchLevel, switchLevelLabel } from "./metrics";
   import { zoomLevels, type TimelineApp, type View } from "./model";
   import { colorBy } from "./preferences";
   import ColorBy from "./ColorBy.svelte";
+  import { categoryGrouping, categoryLabel, categoryNodes, categorySwatches, grouping, isNested } from "./categories";
   import { clusterCommits, commitCount, commitProblems, repositoryLabel, repositorySummary, type CommitCluster } from "./commits";
   import type { Block, Commit, Range } from "./types";
   let { view, app }: { view: View; app: TimelineApp } = $props();
@@ -16,19 +17,23 @@
   const visible = $derived(view.visible);
   const timezone = $derived(view.timezone);
   let expanded = $state(false);
-  // Lanes and fills follow either the application or the configured category.
-  const categoryRows = $derived(new Map(view.categories.map(row => [row.category, row])));
-  const configured = $derived(view.categories.some(row => row.category !== null));
-  const mode = $derived(configured ? $colorBy : "application");
-  const categorySwatchOf = (category: string | null) => categorySwatch(category === null ? undefined : categoryRows.get(category));
+  // Lanes and fills follow the application, the top-level category, or the
+  // most specific category.
+  const nodes = $derived(categoryNodes(view.categories));
+  const configured = $derived(nodes.length > 0);
+  const choice = $derived(grouping($colorBy, nodes));
+  const mode = $derived(choice === "application" ? "application" : "category");
+  const shown = $derived(categoryGrouping(nodes, choice === "subcategory" ? "subcategory" : "category"));
+  const categorySwatchOf = $derived(categorySwatches(nodes));
   const blockSwatch = (block: Block): Swatch => mode === "category"
-    ? categorySwatchOf(block.category) : applicationSwatch(block.group.application);
-  const blockLabel = (block: Block) => mode === "category" ? block.category ?? UNCATEGORIZED : block.group.application;
-  /** Categories present in the visible blocks, in breakdown order. */
+    ? categorySwatchOf(shown.at(block.category)) : applicationSwatch(block.group.application);
+  const blockLabel = (block: Block) => mode === "category" ? shown.at(block.category) ?? UNCATEGORIZED : block.group.application;
+  /** Categories shown for the visible blocks, in tree order. */
   const legend = $derived.by(() => {
-    const present = new Set(blocks.map(block => block.category));
+    const present = new Set(blocks.map(block => shown.at(block.category)));
     return view.categories.filter(row => present.has(row.category));
   });
+  const groupName = $derived(choice === "subcategory" ? "Subcategory" : mode === "category" ? "Category" : "Application");
   // Hourly switches of the loaded range, following the color mode.
   const hours = $derived(view.metrics?.hours ?? []);
   const switchNoun = $derived(mode === "category" ? "category switch" : "application switch");
@@ -148,7 +153,7 @@
   });
   const lanes = $derived(mode === "category"
     ? legend.map(row => ({ key: "category:" + (row.category ?? ""), label: row.category ?? UNCATEGORIZED,
-      blocks: blocks.filter(block => block.category === row.category) }))
+      blocks: blocks.filter(block => shown.at(block.category) === row.category) }))
     : Array.from(new Set(blocks.map(block => block.group.application)), application => ({
       key: "application:" + application, label: application,
       blocks: blocks.filter(block => block.group.application === application) })));
@@ -252,7 +257,7 @@
 <svelte:window bind:innerWidth={viewportWidth} bind:innerHeight={viewportHeight} onscroll={leave} />
 
 {#snippet categoryTag(category: string | null)}
-  <span class="category-tag"><span class="swatch" style={swatchStyle(categorySwatchOf(category))}></span>{category ?? UNCATEGORIZED}</span>
+  <span class="category-tag"><span class="swatch" style={swatchStyle(categorySwatchOf(category))}></span>{categoryLabel(nodes, category)}</span>
 {/snippet}
 
 {#snippet blockTrack(label: string, blocks: Block[])}
@@ -260,7 +265,7 @@
   <div class="track">
     {#each blocks as block (block.id)}
       <div class={"block" + (block.mixed ? " mixed" : "")} style={position(block.range) + ";" + swatchStyle(blockSwatch(block))}
-        data-description={block.group.application + " · " + block.group.title + " · " + (block.category ?? UNCATEGORIZED) + " · " + time(block.range.start_ms, timezone) + " – " + time(block.range.end_ms, timezone) + " · " + block.id}>
+        data-description={block.group.application + " · " + block.group.title + " · " + categoryLabel(nodes, block.category) + " · " + time(block.range.start_ms, timezone) + " – " + time(block.range.end_ms, timezone) + " · " + block.id}>
         {blockLabel(block)}
       </div>
     {/each}
@@ -286,8 +291,8 @@
         </select>
       </label>
     </div>
-    {#if configured}<ColorBy />{/if}
-    <button id="lanes" class="lanes-toggle" aria-expanded={expanded} onclick={() => expanded = !expanded}>{expanded ? "▾" : "▸"} {mode === "category" ? "Category" : "Application"} lanes</button>
+    {#if configured}<ColorBy nested={isNested(nodes)} />{/if}
+    <button id="lanes" class="lanes-toggle" aria-expanded={expanded} onclick={() => expanded = !expanded}>{expanded ? "▾" : "▸"} {groupName} lanes</button>
   </div>
 </nav>
 <div id="timeline" bind:clientWidth={timelineWidth} tabindex="0" role="slider" aria-label="Select time"
@@ -300,7 +305,7 @@
     {#if mode === "category"}
       <ul class="legend" id="category-legend" aria-label="Categories">
         {#each legend as row (row.category)}
-          <li><span class="swatch" style={swatchStyle(categorySwatch(row))}></span>{row.category ?? UNCATEGORIZED}</li>
+          <li><span class="swatch" style={swatchStyle(categorySwatchOf(row.category))}></span>{row.category ?? UNCATEGORIZED}</li>
         {:else}<li>No focus in view</li>{/each}
       </ul>
     {/if}

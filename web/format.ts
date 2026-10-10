@@ -34,11 +34,18 @@ export const color = (name: string) => `hsl(${Array.from(name).reduce((n, c) => 
 export type Swatch = { fill: string; ink: string };
 export const applicationSwatch = (name: string): Swatch => ({ fill: color(name), ink: "var(--ink-on-fill)" });
 export const UNCATEGORIZED = "Uncategorized";
-/** Category fill: an explicit color, else its theme palette slot, else neutral. */
-export function categorySwatch(category?: { color?: string | null; palette?: number | null }): Swatch {
-  if (category?.color) return { fill: category.color, ink: readableInk(category.color) };
-  if (category?.palette) return { fill: `var(--series-${category.palette})`, ink: `var(--series-${category.palette}-ink)` };
-  return { fill: "var(--uncategorized)", ink: "var(--uncategorized-ink)" };
+/** Category fill: an explicit color, else its theme palette slot, else neutral.
+ *  A nonzero `shade` tells apart subcategories sharing their parent's color:
+ *  odd shades lighten and even ones darken, more with each pair. */
+export function categorySwatch(category?: { color?: string | null; palette?: number | null }, shade = 0): Swatch {
+  const base: Swatch = category?.color ? { fill: category.color, ink: readableInk(category.color) }
+    : category?.palette ? { fill: `var(--series-${category.palette})`, ink: `var(--series-${category.palette}-ink)` }
+    : { fill: "var(--uncategorized)", ink: "var(--uncategorized-ink)" };
+  if (!shade) return base;
+  const amount = Math.min(70, 30 * Math.ceil(shade / 2));
+  return shade % 2
+    ? { fill: `color-mix(in oklab, ${base.fill}, white ${amount}%)`, ink: "#0b0f14" }
+    : { fill: `color-mix(in oklab, ${base.fill}, black ${amount}%)`, ink: "#ffffff" };
 }
 export const swatchStyle = (swatch: Swatch) => `background:${swatch.fill};color:${swatch.ink}`;
 /** Dark or light ink, whichever contrasts more with a `#rrggbb` fill. */

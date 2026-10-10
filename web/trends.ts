@@ -2,6 +2,7 @@
  *  Pure functions of the server response and the current time, so the week and
  *  month views only render. Nothing here judges the work: changes are changes. */
 import { duration, formatter } from "./format";
+import type { CategoryGrouping } from "./categories";
 import { hourSwitches, perHour, type SwitchKind } from "./metrics";
 import type { DayFocusMetrics, FocusStretch, Range } from "./types";
 
@@ -78,25 +79,26 @@ export const OTHER = "other";
 const categoryKey = (category: string | null) => "category:" + (category ?? "");
 const applicationKey = (application: string) => "application:" + application;
 
-/** Active focus by subject over all days, keyed like `Subject.key`. */
-export function activeBySubject(days: DayFocusMetrics[], mode: SwitchKind) {
+/** Active focus by subject over all days, keyed like `Subject.key`; categories
+ *  roll up to the level `categories` shows. */
+export function activeBySubject(days: DayFocusMetrics[], mode: SwitchKind, categories?: CategoryGrouping) {
   const totals = new Map<string, number>();
   for (const day of days) {
     const rows = mode === "category"
-      ? day.categories.map(row => [categoryKey(row.category), row.active_ms] as const)
+      ? day.categories.map(row => [categoryKey(categories ? categories.at(row.category) : row.category), row.active_ms] as const)
       : day.applications.map(row => [applicationKey(row.application), row.active_ms] as const);
     for (const [key, active] of rows) totals.set(key, (totals.get(key) ?? 0) + active);
   }
   return totals;
 }
 
-/** Stack series of active focus per day: configured categories in order then
- *  uncategorized, or the `limit` applications with most active focus then the rest
- *  as one series. Only subjects with active focus in the period. */
-export function subjects(days: DayFocusMetrics[], mode: SwitchKind, configured: string[], limit = 7): Subject[] {
+/** Stack series of active focus per day: the categories `categories` shows in
+ *  tree order then uncategorized, or the `limit` applications with most active
+ *  focus then the rest as one series. Only subjects with active focus in the period. */
+export function subjects(days: DayFocusMetrics[], mode: SwitchKind, categories: CategoryGrouping, limit = 7): Subject[] {
   if (mode === "category") {
-    return [...configured, null].map(category => {
-      const per = days.map(day => day.categories.find(row => row.category === category)?.active_ms ?? 0);
+    return [...categories.order, null].map(category => {
+      const per = days.map(day => sum(day.categories.filter(row => categories.at(row.category) === category).map(row => row.active_ms)));
       return { key: categoryKey(category), name: category ?? "Uncategorized", category, days: per, total: sum(per) };
     }).filter(subject => subject.total > 0);
   }
@@ -122,9 +124,9 @@ export type SubjectChange = { subject: Subject; current: number; previous: numbe
 /** Subjects of the current period with their comparison totals; with categories,
  *  also categories that only had focus in the comparison period. */
 export function compareSubjects(current: DayFocusMetrics[], previous: DayFocusMetrics[] | null,
-  mode: SwitchKind, configured: string[], limit = 10): SubjectChange[] {
-  const shown = subjects(current, mode, configured, limit);
-  const before = previous && activeBySubject(previous, mode);
+  mode: SwitchKind, categories: CategoryGrouping, limit = 10): SubjectChange[] {
+  const shown = subjects(current, mode, categories, limit);
+  const before = previous && activeBySubject(previous, mode, categories);
   const rows: SubjectChange[] = shown.map(subject => ({ subject, current: subject.total, previous: null }));
   if (before) {
     const listed = new Set(shown.map(subject => subject.key));
@@ -134,12 +136,12 @@ export function compareSubjects(current: DayFocusMetrics[], previous: DayFocusMe
         : before.get(row.subject.key) ?? 0;
     }
     if (mode === "category") {
-      for (const category of [...configured, null]) {
+      for (const category of [...categories.order, null]) {
         const key = categoryKey(category), total = before.get(key) ?? 0;
         if (total > 0 && !listed.has(key))
           rows.push({ subject: { key, name: category ?? "Uncategorized", category, days: current.map(() => 0), total: 0 }, current: 0, previous: total });
       }
-      const order = [...configured, null].map(categoryKey);
+      const order = [...categories.order, null].map(categoryKey);
       rows.sort((a, b) => order.indexOf(a.subject.key) - order.indexOf(b.subject.key));
     }
   }

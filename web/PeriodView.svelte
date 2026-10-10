@@ -5,9 +5,10 @@
   import StatTile from "./StatTile.svelte";
   import SubjectComparison from "./SubjectComparison.svelte";
   import TrendChart from "./TrendChart.svelte";
+  import { categoryGrouping, categoryLabel, categorySwatches, grouping, isNested } from "./categories";
   import { commitCount, commitDays, commitProblems } from "./commits";
   import { dateSpan, shortDate } from "./dates";
-  import { applicationSwatch, categorySwatch, clock, clockRange, duration, swatchStyle, type Swatch } from "./format";
+  import { applicationSwatch, clock, clockRange, duration, swatchStyle, type Swatch } from "./format";
   import { plural } from "./metrics";
   import type { PeriodModel } from "./period";
   import { colorBy } from "./preferences";
@@ -28,8 +29,12 @@
   const shown = $derived($view.period ?? period);
   const now = $derived($view.now);
   const timezone = $derived($view.timezone);
-  const configured = $derived($view.categories.map(category => category.name));
-  const mode = $derived(configured.length ? $colorBy : "application");
+  const configured = $derived($view.categories.length > 0);
+  const choice = $derived(grouping($colorBy, $view.categories));
+  const mode = $derived(choice === "application" ? "application" : "category");
+  /** Categories as shown: rolled up to the top level, or in full detail. */
+  const shownCategories = $derived(categoryGrouping($view.categories, choice === "subcategory" ? "subcategory" : "category"));
+  const groupNoun = $derived(choice === "subcategory" ? "subcategory" : mode);
   const noun = $derived(shown.kind);
   const name = $derived(comparisonName(shown));
   const comparison = $derived($view.comparison);
@@ -44,14 +49,15 @@
   const commitNote = $derived($view.commitError ? `Commits unavailable: ${$view.commitError}.`
     : commitProblems(commitList) ? `Commits may be missing: ${commitProblems(commitList)}.` : "");
 
+  const categoryColor = $derived(categorySwatches($view.categories));
   const swatch = (subject: Subject): Swatch => subject.category !== undefined
-    ? categorySwatch($view.categories.find(category => category.name === subject.category))
+    ? categoryColor(subject.category)
     : subject.application !== undefined ? applicationSwatch(subject.application)
     : { fill: "var(--uncategorized)", ink: "var(--uncategorized-ink)" };
   const subjectSwatch = (subject: FocusSubject) => subject.kind === "category"
-    ? categorySwatch($view.categories.find(category => category.name === subject.name)) : applicationSwatch(subject.name);
-  const stack = $derived(data ? subjects(data.days, mode, configured) : []);
-  const changes = $derived(data ? compareSubjects(data.days, comparison?.data.days ?? null, mode, configured) : []);
+    ? categoryColor(subject.name) : applicationSwatch(subject.name);
+  const stack = $derived(data ? subjects(data.days, mode, shownCategories) : []);
+  const changes = $derived(data ? compareSubjects(data.days, comparison?.data.days ?? null, mode, shownCategories) : []);
   const series = $derived(data ? trendSeries(data.days, mode) : null);
   // Days that have not begun have no hours to show.
   const cells = $derived(data ? heatmap(data.days.filter(day => day.range.start_ms < now), mode, timezone, now) : []);
@@ -92,7 +98,7 @@
         <button id="period-next" aria-label={`Next ${kindName}`} onclick={() => onperiod(period.first, 1)}>›</button>
       </div>
       <button id="period-current" class="primary-action" disabled={containsDate(period, today)} onclick={() => onperiod(null)}>This {kindName}</button>
-      {#if configured.length}<span class="navigation-end"><ColorBy /></span>{/if}
+      {#if configured}<span class="navigation-end"><ColorBy nested={isNested($view.categories)} /></span>{/if}
     </div>
   </nav>
   <div class="period-heading" class:stale={$view.loading}>
@@ -118,7 +124,7 @@
           {current.longest ? duration(current.longest.stretch.elapsed_ms) : "—"}
           {#snippet detail()}
             {#if current.longest}
-              <span class="category-tag"><span class="swatch" style={swatchStyle(subjectSwatch(current.longest.stretch.subject))}></span>{current.longest.stretch.subject.name}</span>
+              <span class="category-tag"><span class="swatch" style={swatchStyle(subjectSwatch(current.longest.stretch.subject))}></span>{current.longest.stretch.subject.kind === "category" ? categoryLabel($view.categories, current.longest.stretch.subject.name) : current.longest.stretch.subject.name}</span>
               {` · ${shortDate(current.longest.date)}, ${clockRange(current.longest.stretch.range, timezone)}`}
             {:else}No active focus{/if}
           {/snippet}
@@ -135,7 +141,7 @@
       </p>
 
       <section class="period-section" aria-labelledby="daily-heading">
-        <h3 id="daily-heading">Focus by day <span class="muted">· active focus by {mode}, idle on top</span></h3>
+        <h3 id="daily-heading">Focus by day <span class="muted">· active focus by {groupNoun}, idle on top</span></h3>
         <DailyFocusChart days={data.days} subjects={stack} {swatch} {now} {commits} onopen={date => onopen(date)}
           onshift={delta => onperiod(period.first, delta)} onhome={() => onperiod(null)} />
         {#if commitList}
@@ -163,7 +169,7 @@
       </section>
 
       <div class="period-columns">
-        <SubjectComparison rows={changes} {swatch} heading={mode === "category" ? "Categories" : "Applications"}
+        <SubjectComparison rows={changes} {swatch} heading={choice === "subcategory" ? "Subcategories" : mode === "category" ? "Categories" : "Applications"}
           current={`This ${kindName}`} previous={name} comparing={$view.comparing} missing={!!previous && !comparable} />
         {#if series}
           <section class="period-section trends" aria-labelledby="trends-heading">
@@ -197,7 +203,7 @@
         <HourHeatmap rows={cells} kind={mode} {timezone} onopen={(date, range) => onopen(date, range)} />
       </section>
 
-      <p class="muted breakdown-note">Bars stack active focus (focus outside idle periods) by {mode}, with idle focus on top; together
+      <p class="muted breakdown-note">Bars stack active focus (focus outside idle periods) by {groupNoun}, with idle focus on top; together
         they are recorded focus. Hatched days and hours have no evidence: the recorder was paused, locked, stopped or not yet running,
         which is not the same as no activity. Changes compare the same number of activity days immediately before{#if comparison?.partial}, up
         to the same day and time{/if}. Weeks start on Monday. Context switches and focus stretches are defined as in the day view.

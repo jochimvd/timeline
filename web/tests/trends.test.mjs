@@ -9,6 +9,8 @@ const load = async entry => {
 const routes = await load("web/routes.ts");
 const trends = await load("web/trends.ts");
 const dates = await load("web/dates.ts");
+const categoryTree = await load("web/categories.ts");
+const flat = names => categoryTree.categoryGrouping(names.map(name => ({ name, parent: null })), "category");
 
 test("routes round-trip views, normalize periods and reject malformed dates", () => {
   assert.deepEqual(routes.parseRoute(""), { view: "day" });
@@ -74,31 +76,55 @@ test("period summaries add days, keep the longest stretch and separate missing e
   assert.equal(trends.rateDelta(null, 5.5, ""), undefined);
 });
 
+test("subcategories roll up to their top-level category or stay in full detail", () => {
+  const nodes = [{ name: "Work", parent: null }, { name: "Acme", parent: "Work" },
+    { name: "Project X", parent: "Acme" }, { name: "Personal", parent: null }];
+  assert.deepEqual(categoryTree.categoryPath(nodes, "Project X"), ["Work", "Acme", "Project X"]);
+  assert.equal(categoryTree.categoryLabel(nodes, "Project X"), "Work › Acme › Project X");
+  assert.equal(categoryTree.categoryLabel(nodes, null), "Uncategorized");
+  assert.equal(categoryTree.grouping("subcategory", nodes), "subcategory");
+  assert.equal(categoryTree.grouping("subcategory", [{ name: "Flat", parent: null }]), "category",
+    "a remembered subcategory choice falls back once nothing is nested");
+  assert.equal(categoryTree.grouping("category", []), "application");
+
+  const rows = list => list.map(([category, active_ms]) => ({ category, focus_ms: active_ms, active_ms }));
+  const days = [day("2026-10-05", { categories: rows([["Project X", 3 * HOUR], ["Work", HOUR], ["Personal", HOUR]]) })];
+  const top = trends.subjects(days, "category", categoryTree.categoryGrouping(nodes, "category"));
+  assert.deepEqual(top.map(subject => [subject.name, subject.total]), [["Work", 4 * HOUR], ["Personal", HOUR]]);
+  const detail = trends.subjects(days, "category", categoryTree.categoryGrouping(nodes, "subcategory"));
+  assert.deepEqual(detail.map(subject => [subject.name, subject.total]),
+    [["Work", HOUR], ["Project X", 3 * HOUR], ["Personal", HOUR]], "a parent's own matches stay its own series");
+  const previous = [day("2026-09-28", { categories: rows([["Acme", 2 * HOUR]]) })];
+  const changes = trends.compareSubjects(days, previous, "category", categoryTree.categoryGrouping(nodes, "category"));
+  assert.deepEqual(changes.map(row => [row.subject.name, row.current, row.previous]),
+    [["Work", 4 * HOUR, 2 * HOUR], ["Personal", HOUR, 0]]);
+});
+
 test("subjects stack categories in configured order and fold the application tail", () => {
   const categories = (rows) => rows.map(([category, active_ms]) => ({ category, focus_ms: active_ms, active_ms }));
   const days = [
     day("2026-10-05", { categories: categories([["Code", 3 * HOUR], [null, HOUR]]) }),
     day("2026-10-06", { categories: categories([["Chat", HOUR]]) }),
   ];
-  const stacked = trends.subjects(days, "category", ["Code", "Chat", "Unused"]);
+  const stacked = trends.subjects(days, "category", flat(["Code", "Chat", "Unused"]));
   assert.deepEqual(stacked.map(subject => [subject.name, subject.days]),
     [["Code", [3 * HOUR, 0]], ["Chat", [0, HOUR]], ["Uncategorized", [HOUR, 0]]]);
   const previous = [day("2026-09-28", { categories: categories([["Unused", HOUR], ["Code", HOUR]]) })];
-  const changes = trends.compareSubjects(days, previous, "category", ["Code", "Chat", "Unused"]);
+  const changes = trends.compareSubjects(days, previous, "category", flat(["Code", "Chat", "Unused"]));
   assert.deepEqual(changes.map(row => [row.subject.name, row.current, row.previous]),
     [["Code", 3 * HOUR, HOUR], ["Chat", HOUR, 0], ["Unused", 0, HOUR], ["Uncategorized", HOUR, 0]],
     "categories only seen in the comparison period stay listed in order");
 
   const many = [day("2026-10-05", { applications: Array.from({ length: 10 }, (_, index) => app("app" + index, (10 - index) * MIN)) })];
-  const folded = trends.subjects(many, "application", [], 7);
+  const folded = trends.subjects(many, "application", flat([]), 7);
   assert.equal(folded.length, 8);
   assert.equal(folded.at(-1).key, trends.OTHER);
   assert.equal(folded.at(-1).name, "3 other applications");
   assert.deepEqual(folded.at(-1).days, [6 * MIN]);
-  assert.equal(trends.subjects(many.map(value => ({ ...value, applications: value.applications.slice(0, 8) })), "application", [], 7).length, 8,
+  assert.equal(trends.subjects(many.map(value => ({ ...value, applications: value.applications.slice(0, 8) })), "application", flat([]), 7).length, 8,
     "one remaining application keeps its name");
   const before = [day("2026-09-28", { applications: [app("app0", MIN), app("elsewhere", 5 * MIN)] })];
-  const rows = trends.compareSubjects(many, before, "application", [], 7);
+  const rows = trends.compareSubjects(many, before, "application", flat([]), 7);
   assert.equal(rows[0].previous, MIN);
   assert.equal(rows.at(-1).previous, 5 * MIN, "other compares with applications not listed");
 });
