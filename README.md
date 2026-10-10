@@ -98,13 +98,16 @@ and MCP adapters. Open one connection per worker with `Queries::open(history_pat
 All operations take `Client::Browser` or `Client::Mcp`; adapters must supply their
 own client class rather than accepting it from a request. The service offers:
 
-- `overview`: activity date or an explicit half-open range, at most 31 days;
+- `overview`: activity date, consecutive activity dates (`Selection::ActivityDates`,
+  both inclusive, at most 31 even across a daylight-saving change) or an explicit
+  half-open range, at most 31 days;
   category/application/exact-title totals, idle/no-focus totals, and paginated
   independent focus/image coverage, and [focus metrics](#focus-metrics) for the
   range. Totals include recorded idle focus and do not imply task time.
-- `focus_metrics`: [focus metrics](#focus-metrics) and focus totals per activity
-  day of a date or a range of at most 31 days, from one coverage scan without
-  image coverage. Each day matches the overview metrics of that day.
+- `focus_metrics`: [focus metrics](#focus-metrics), focus totals, focus by
+  category and application, and [evidence](#day-evidence) per activity day of a
+  selection of at most 31 days, from one coverage scan without image coverage.
+  Each day matches the overview metrics of that day.
 - `categories`: the configured [categories](#categories) and their rules, plus
   the reason the settings file was ignored, if it was invalid.
 - `overview_display`: optional display-point budget (1–2048) for lossy timeline
@@ -281,6 +284,20 @@ Metrics are clipped to the requested range like totals: a stretch crossing its
 edge is cut there, and a transition exactly at its start has no observed
 predecessor. Per-day metrics therefore add up to a multi-day range except for
 stretches and switches across 04:00.
+
+### Day evidence
+
+Each `focus_metrics` day also says how much of it has evidence, so a day without
+recorded focus is not mistaken for a day without activity. `categories` lists
+recorded (`focus_ms`) and active (`active_ms`) focus per configured category in
+file order, then uncategorized focus, each only with focus (empty without
+categories); `applications` does the same per application, most focus first.
+`evidence` splits the day's wall-clock time into `observed_ms` (focus, idle or a
+confirmed absence of focus), `gap_ms` (recording gaps: pause, lock, disconnect,
+restart, suspend) and `unknown_ms` (no evidence), with the merged `intervals`
+of each kind and gap `reason`. Gaps and unknown time count only up to the time of
+the query, so the future of the current day is none of them and the totals add up
+to its elapsed part. Subject and evidence entries share the 8 MiB breakdown budget.
 
 ## Screenshot capture
 

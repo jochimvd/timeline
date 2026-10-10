@@ -38,9 +38,10 @@ use coverage::is_boundary;
 pub use display::{DisplayFocus, DisplayImage};
 use images::ImageContext;
 pub use metrics::{
-    BRIEF_INTERRUPTION_MS, DayFocusMetrics, FocusMetrics, FocusMetricsByDay, FocusStretch,
-    FocusSubject, HourlyFocus, LONG_STRETCH_MS, MAX_INTERRUPTED_PERCENT, MEDIUM_STRETCH_MS,
-    StretchBucket, StretchDistribution,
+    ApplicationFocus, BRIEF_INTERRUPTION_MS, CategoryFocus, DayEvidence, DayFocusMetrics,
+    EvidenceInterval, EvidenceKind, FocusMetrics, FocusMetricsByDay, FocusStretch, FocusSubject,
+    HourlyFocus, LONG_STRETCH_MS, MAX_INTERRUPTED_PERCENT, MEDIUM_STRETCH_MS, StretchBucket,
+    StretchDistribution,
 };
 pub use navigation::ActivityBounds;
 use overview::cached_overview;
@@ -51,6 +52,8 @@ use segments::{Plan, Run, Scope};
 pub use updates::{OverviewChange, OverviewUpdates};
 
 const HOUR: i64 = 3_600_000;
+/// Analysis ranges: overviews and focus metrics.
+const MAX_RANGE_MS: i64 = 31 * 24 * HOUR;
 const PAGE_BYTES: usize = 1024 * 1024;
 const BREAKDOWN_BYTES: usize = 8 * 1024 * 1024;
 
@@ -103,6 +106,11 @@ pub struct ResolvedRange {
 #[derive(Debug, Clone)]
 pub enum Selection {
     ActivityDate(NaiveDate),
+    /// Consecutive activity days, both inclusive: at most 31.
+    ActivityDates {
+        first: NaiveDate,
+        last: NaiveDate,
+    },
     Range(Range),
 }
 
@@ -389,30 +397,44 @@ impl Queries {
         Ok(())
     }
     pub fn resolve(&self, selection: Selection) -> Result<ResolvedRange> {
-        let range = match selection {
-            Selection::Range(range) => range,
-            Selection::ActivityDate(date) => {
-                let next = date.succ_opt().ok_or(QueryError::InvalidRequest)?;
-                let boundary = |date: NaiveDate| -> Result<i64> {
-                    let local = date
-                        .and_hms_opt(4, 0, 0)
-                        .ok_or(QueryError::InvalidRequest)?;
-                    // An exceptional timezone fold/gap at 04:00 needs an explicit
-                    // range, not an arbitrary choice of one possible boundary.
-                    Ok(self
-                        .timezone
-                        .from_local_datetime(&local)
-                        .single()
-                        .ok_or(QueryError::InvalidRequest)?
-                        .timestamp_millis())
-                };
+        // An exceptional timezone fold/gap at 04:00 needs an explicit range,
+        // not an arbitrary choice of one possible boundary.
+        let boundary = |date: NaiveDate| -> Result<i64> {
+            let local = date
+                .and_hms_opt(4, 0, 0)
+                .ok_or(QueryError::InvalidRequest)?;
+            Ok(self
+                .timezone
+                .from_local_datetime(&local)
+                .single()
+                .ok_or(QueryError::InvalidRequest)?
+                .timestamp_millis())
+        };
+        let next = |date: NaiveDate| date.succ_opt().ok_or(QueryError::InvalidRequest);
+        let (range, maximum) = match selection {
+            Selection::Range(range) => (range, MAX_RANGE_MS),
+            Selection::ActivityDate(date) => (
                 Range {
                     start_ms: boundary(date)?,
-                    end_ms: boundary(next)?,
+                    end_ms: boundary(next(date)?)?,
+                },
+                MAX_RANGE_MS,
+            ),
+            Selection::ActivityDates { first, last } => {
+                if !(0..31).contains(&(last - first).num_days()) {
+                    bail!(QueryError::InvalidRequest);
                 }
+                // 31 activity days can include a daylight-saving hour.
+                (
+                    Range {
+                        start_ms: boundary(first)?,
+                        end_ms: boundary(next(last)?)?,
+                    },
+                    MAX_RANGE_MS + HOUR,
+                )
             }
         };
-        range.validate(31 * 24 * HOUR)?;
+        range.validate(maximum)?;
         Ok(ResolvedRange {
             range,
             timezone: self.timezone.to_string(),

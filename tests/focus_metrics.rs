@@ -447,3 +447,196 @@ fn live_updates_carry_current_metrics() {
     assert_eq!(metrics.active_ms, 15 * MIN);
 }
 const HOUR_MS: i64 = 60 * MIN;
+
+#[test]
+fn days_carry_focus_by_category_and_application_and_their_evidence() {
+    let zone: chrono_tz::Tz = "Europe/Oslo".parse().unwrap();
+    let at = |day: u32, hour: u32, minute: u32| {
+        zone.with_ymd_and_hms(2026, 10, day, hour, minute, 0)
+            .unwrap()
+            .timestamp_millis()
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let mut recording = Recording::new(dir.path(), at(5, 9, 0));
+    recording
+        .focus(Some("editor"), 30 * MIN)
+        .idle(10 * MIN)
+        .focus(Some("browser"), 20 * MIN)
+        .pause(15 * MIN)
+        .focus(Some("chat"), 5 * MIN)
+        .focus(None, 5 * MIN);
+    let end = recording.end();
+    assert_eq!(end, at(5, 10, 25));
+    let q = queries(dir.path(), true);
+    let days = q
+        .focus_metrics(
+            Mcp,
+            Selection::ActivityDates {
+                first: "2026-10-04".parse().unwrap(),
+                last: "2026-10-05".parse().unwrap(),
+            },
+        )
+        .unwrap()
+        .days;
+    assert_eq!(days.len(), 2);
+    let (empty, day) = (&days[0], &days[1]);
+
+    // A day before any evidence has none, rather than zero activity.
+    assert!(empty.categories.is_empty() && empty.applications.is_empty());
+    assert_eq!(empty.evidence.observed_ms, 0);
+    assert_eq!(empty.evidence.unknown_ms, 24 * 60 * MIN);
+    assert_eq!(empty.evidence.intervals.len(), 1);
+
+    let categories: Vec<_> = day
+        .categories
+        .iter()
+        .map(|row| (row.category.as_deref(), row.focus_ms, row.active_ms))
+        .collect();
+    assert_eq!(
+        categories,
+        [
+            (Some("Code"), 40 * MIN, 30 * MIN),
+            (Some("Chat"), 5 * MIN, 5 * MIN),
+            (None, 20 * MIN, 20 * MIN),
+        ],
+        "configured order, then uncategorized; idle focus is not active"
+    );
+    let applications: Vec<_> = day
+        .applications
+        .iter()
+        .map(|row| (row.application.as_str(), row.focus_ms))
+        .collect();
+    assert_eq!(
+        applications,
+        [
+            ("editor", 40 * MIN),
+            ("browser", 20 * MIN),
+            ("chat", 5 * MIN)
+        ]
+    );
+    assert_eq!(
+        day.categories.iter().map(|row| row.active_ms).sum::<i64>(),
+        day.metrics.active_ms
+    );
+    assert_eq!(
+        day.categories.iter().map(|row| row.focus_ms).sum::<i64>(),
+        day.totals.focus_ms
+    );
+
+    let evidence = &day.evidence;
+    assert_eq!(evidence.observed_ms, 70 * MIN, "focus, idle and no focus");
+    assert_eq!(evidence.gap_ms, 15 * MIN);
+    assert_eq!(
+        evidence.observed_ms + evidence.gap_ms + evidence.unknown_ms,
+        day.range.end_ms - day.range.start_ms,
+        "a past day is fully accounted for"
+    );
+    let intervals: Vec<_> = evidence
+        .intervals
+        .iter()
+        .map(|interval| {
+            (
+                interval.kind,
+                interval.reason.as_deref(),
+                interval.range.start_ms,
+                interval.range.end_ms,
+            )
+        })
+        .collect();
+    assert_eq!(
+        intervals,
+        [
+            (EvidenceKind::Unknown, None, at(5, 4, 0), at(5, 9, 0)),
+            (EvidenceKind::Observed, None, at(5, 9, 0), at(5, 10, 0)),
+            (
+                EvidenceKind::Gap,
+                Some("pause"),
+                at(5, 10, 0),
+                at(5, 10, 15)
+            ),
+            (EvidenceKind::Observed, None, at(5, 10, 15), end),
+            (EvidenceKind::Unknown, None, end, at(6, 4, 0)),
+        ],
+        "adjacent coverage of one kind merges"
+    );
+
+    // Without categories, days still carry applications.
+    let plain = queries(dir.path(), false)
+        .focus_metrics(Mcp, Selection::ActivityDate("2026-10-05".parse().unwrap()))
+        .unwrap();
+    assert!(plain.days[0].categories.is_empty());
+    assert_eq!(plain.days[0].applications.len(), 3);
+}
+
+#[test]
+fn activity_date_spans_cover_up_to_31_days_including_daylight_saving() {
+    let dir = tempfile::tempdir().unwrap();
+    Recording::new(dir.path(), 0)
+        .focus(Some("editor"), MIN)
+        .end();
+    let q = queries(dir.path(), true);
+    let dates = |first: &str, last: &str| Selection::ActivityDates {
+        first: first.parse().unwrap(),
+        last: last.parse().unwrap(),
+    };
+    // October 2026 in Oslo has 31 days and a 25-hour day.
+    let october = q.resolve(dates("2026-10-01", "2026-10-31")).unwrap().range;
+    assert_eq!(october.end_ms - october.start_ms, (31 * 24 + 1) * 60 * MIN);
+    let days = q
+        .focus_metrics(Browser, dates("2026-10-01", "2026-10-31"))
+        .unwrap()
+        .days;
+    assert_eq!(days.len(), 31);
+    assert_eq!(days[30].date, "2026-10-31");
+    let week = q.resolve(dates("2026-10-05", "2026-10-11")).unwrap().range;
+    assert_eq!(
+        week.start_ms,
+        q.resolve(Selection::ActivityDate("2026-10-05".parse().unwrap()))
+            .unwrap()
+            .range
+            .start_ms
+    );
+    for (first, last) in [("2026-10-01", "2026-11-01"), ("2026-10-05", "2026-10-04")] {
+        let error = q.resolve(dates(first, last)).unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<QueryError>(),
+            Some(&QueryError::InvalidRequest),
+            "{first}..{last}"
+        );
+    }
+}
+
+#[test]
+fn evidence_does_not_count_the_future_as_missing() {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    let dir = tempfile::tempdir().unwrap();
+    Recording::new(dir.path(), now - 2 * HOUR_MS)
+        .focus(Some("editor"), HOUR_MS)
+        .end();
+    let q = queries(dir.path(), true);
+    let range = Range {
+        start_ms: now - 3 * HOUR_MS,
+        end_ms: now + 3 * HOUR_MS,
+    };
+    let days = q.focus_metrics(Mcp, Selection::Range(range)).unwrap().days;
+    let evidence =
+        |field: fn(&DayEvidence) -> i64| days.iter().map(|day| field(&day.evidence)).sum::<i64>();
+    assert_eq!(evidence(|e| e.observed_ms), HOUR_MS);
+    let unknown = evidence(|e| e.unknown_ms);
+    let checked = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    assert!(
+        (2 * HOUR_MS..=2 * HOUR_MS + checked - now).contains(&unknown),
+        "unknown before and after the hour, up to the query time: {unknown}"
+    );
+    assert!(
+        days.iter()
+            .flat_map(|day| &day.evidence.intervals)
+            .all(|interval| interval.range.end_ms <= checked)
+    );
+}

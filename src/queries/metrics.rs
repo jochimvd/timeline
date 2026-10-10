@@ -10,6 +10,7 @@
 //! uncertain intervals contribute none. Metrics are clipped to the requested
 //! range: a transition exactly at its start has no observed predecessor.
 use super::*;
+use crate::categories::Categories;
 use chrono::{DateTime, Offset, TimeZone};
 
 /// An interruption at least this long ends a focus stretch. Shorter ones —
@@ -419,6 +420,51 @@ fn per_hour(switches: i64, active_ms: i64) -> Option<f64> {
         .then(|| (switches as f64 * HOUR as f64 / active_ms as f64 * 10.0).round() / 10.0)
 }
 
+/// Focus on one category, or on one application, within an activity day.
+#[derive(Debug, Clone, Serialize)]
+pub struct CategoryFocus {
+    /// Null for uncategorized focus.
+    pub category: Option<String>,
+    /// Recorded focus, including idle periods.
+    pub focus_ms: i64,
+    /// Focus outside idle periods.
+    pub active_ms: i64,
+}
+#[derive(Debug, Clone, Serialize)]
+pub struct ApplicationFocus {
+    pub application: String,
+    pub focus_ms: i64,
+    pub active_ms: i64,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EvidenceKind {
+    /// Focus evidence: a focused window, idle or not, or a confirmed absence of focus.
+    Observed,
+    /// A recording gap with its reason, such as a pause, lock or restart.
+    Gap,
+    /// No evidence.
+    Unknown,
+}
+/// A maximal run of one kind of evidence, in wall-clock time.
+#[derive(Debug, Clone, Serialize)]
+pub struct EvidenceInterval {
+    pub range: Range,
+    pub kind: EvidenceKind,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+/// Which part of a day has evidence, in wall-clock time. Recording gaps and
+/// unknown time count only before the query time: the future is neither, so
+/// the three totals add up to the elapsed part of the day.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct DayEvidence {
+    pub observed_ms: i64,
+    pub gap_ms: i64,
+    pub unknown_ms: i64,
+    pub intervals: Vec<EvidenceInterval>,
+}
+
 /// Focus totals and metrics of one activity day, clipped to the requested range.
 #[derive(Debug, Serialize)]
 pub struct DayFocusMetrics {
@@ -426,12 +472,146 @@ pub struct DayFocusMetrics {
     pub date: String,
     pub range: Range,
     pub totals: Totals,
+    /// Focus by category: configured categories in order, then uncategorized,
+    /// each only with focus. Empty without configured categories.
+    pub categories: Vec<CategoryFocus>,
+    /// Focus by application, most first.
+    pub applications: Vec<ApplicationFocus>,
+    pub evidence: DayEvidence,
     pub metrics: FocusMetrics,
 }
 #[derive(Debug, Serialize)]
 pub struct FocusMetricsByDay {
     pub resolved: ResolvedRange,
     pub days: Vec<DayFocusMetrics>,
+}
+
+/// Accumulates one activity day. `bytes` accounts subject and evidence entries
+/// across all days against the breakdown budget.
+struct Day {
+    date: NaiveDate,
+    range: Range,
+    totals: Totals,
+    categories: HashMap<Option<String>, (i64, i64)>,
+    applications: HashMap<String, (i64, i64)>,
+    evidence: DayEvidence,
+    metrics: Metrics,
+}
+impl Day {
+    fn add(&mut self, coverage: &Coverage, now: i64, bytes: &mut usize) -> Result<()> {
+        self.totals.add(coverage);
+        self.metrics.add(coverage);
+        let elapsed = coverage.elapsed_ms.unwrap_or(0);
+        let (kind, reason) = match &coverage.focus {
+            FocusCoverage::Focus {
+                window,
+                idle,
+                category,
+            } => {
+                let active = if *idle { 0 } else { elapsed };
+                let entry = match self.categories.get_mut(category) {
+                    Some(entry) => entry,
+                    None => {
+                        *bytes += category.as_ref().map_or(0, String::len) + 64;
+                        self.categories.entry(category.clone()).or_default()
+                    }
+                };
+                entry.0 += elapsed;
+                entry.1 += active;
+                let entry = match self.applications.get_mut(&window.application) {
+                    Some(entry) => entry,
+                    None => {
+                        *bytes += window.application.len() + 64;
+                        self.applications
+                            .entry(window.application.clone())
+                            .or_default()
+                    }
+                };
+                entry.0 += elapsed;
+                entry.1 += active;
+                (EvidenceKind::Observed, None)
+            }
+            FocusCoverage::NoFocus { .. } => (EvidenceKind::Observed, None),
+            FocusCoverage::Gap { reason } => (EvidenceKind::Gap, Some(reason)),
+            FocusCoverage::Unknown => (EvidenceKind::Unknown, None),
+        };
+        let mut range = coverage.range;
+        if kind != EvidenceKind::Observed {
+            match range.clip(range.start_ms, now) {
+                Some(past) => range = past,
+                None => return Ok(()),
+            }
+        }
+        let width = range.end_ms - range.start_ms;
+        let evidence = &mut self.evidence;
+        *match kind {
+            EvidenceKind::Observed => &mut evidence.observed_ms,
+            EvidenceKind::Gap => &mut evidence.gap_ms,
+            EvidenceKind::Unknown => &mut evidence.unknown_ms,
+        } += width;
+        match evidence.intervals.last_mut() {
+            Some(last)
+                if last.range.end_ms == range.start_ms
+                    && last.kind == kind
+                    && last.reason.as_ref() == reason =>
+            {
+                last.range.end_ms = range.end_ms;
+            }
+            _ => {
+                *bytes += reason.map_or(0, String::len) + 64;
+                evidence.intervals.push(EvidenceInterval {
+                    range,
+                    kind,
+                    reason: reason.cloned(),
+                });
+            }
+        }
+        if *bytes > BREAKDOWN_BYTES {
+            bail!(QueryError::LimitExceeded);
+        }
+        Ok(())
+    }
+    fn finish(self, categories: &Categories) -> DayFocusMetrics {
+        let mut by_category = self.categories;
+        let configured = !categories.list().is_empty();
+        let categories = categories
+            .list()
+            .iter()
+            .map(|category| Some(category.name.clone()))
+            .chain(configured.then_some(None))
+            .filter_map(|category| {
+                let (focus_ms, active_ms) = by_category.remove(&category)?;
+                (focus_ms > 0 || active_ms > 0).then_some(CategoryFocus {
+                    category,
+                    focus_ms,
+                    active_ms,
+                })
+            })
+            .collect();
+        let mut applications: Vec<_> = self
+            .applications
+            .into_iter()
+            .map(|(application, (focus_ms, active_ms))| ApplicationFocus {
+                application,
+                focus_ms,
+                active_ms,
+            })
+            .collect();
+        applications.sort_by(|a, b| {
+            b.focus_ms
+                .cmp(&a.focus_ms)
+                .then_with(|| a.application.cmp(&b.application))
+        });
+        DayFocusMetrics {
+            date: self.date.to_string(),
+            range: self.range,
+            totals: self.totals,
+            categories,
+            applications,
+            evidence: self.evidence,
+            metrics: self.metrics.finish(),
+        }
+    }
 }
 
 impl Queries {
@@ -442,12 +622,16 @@ impl Queries {
             !self.settings.categories.list().is_empty(),
         )
     }
-    /// Totals and focus metrics per activity day of a date or a range up to 31
-    /// days, from one coverage pass without image coverage. Each day equals the
-    /// overview metrics of that day clipped to the range.
+    /// Totals, focus by category and application, evidence and focus metrics per
+    /// activity day of a selection up to 31 days, from one coverage pass without
+    /// image coverage. Each day's metrics equal the overview metrics of that day
+    /// clipped to the range.
     pub fn focus_metrics(&self, client: Client, selection: Selection) -> Result<FocusMetricsByDay> {
         let resolved = self.resolve(selection)?;
         let range = resolved.range;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.as_millis() as i64);
         let mut days = Vec::new();
         let start = self
             .timezone
@@ -463,7 +647,15 @@ impl Queries {
                 break;
             }
             if let Some(clipped) = range.clip(day.start_ms, day.end_ms) {
-                days.push((date, clipped, Totals::default(), self.metrics(clipped)));
+                days.push(Day {
+                    date,
+                    range: clipped,
+                    totals: Totals::default(),
+                    categories: HashMap::new(),
+                    applications: HashMap::new(),
+                    evidence: DayEvidence::default(),
+                    metrics: self.metrics(clipped),
+                });
             }
             date = date.succ_opt().ok_or(QueryError::InvalidRequest)?;
         }
@@ -471,17 +663,20 @@ impl Queries {
         let _snapshot = self.history.connection.unchecked_transaction()?;
         let cursor = self.cursor("focus_metrics".into(), &PageRequest::default())?;
         let plan = self.plan(&cursor, range, Scope::Evidence)?;
+        let mut bytes = 0;
         self.coverage(&cursor, range, &plan, None, |coverage| {
-            let first = days.partition_point(|day| day.1.end_ms <= coverage.range.start_ms);
-            for (_, day, totals, metrics) in &mut days[first..] {
-                if day.start_ms >= coverage.range.end_ms {
+            let first = days.partition_point(|day| day.range.end_ms <= coverage.range.start_ms);
+            for day in &mut days[first..] {
+                if day.range.start_ms >= coverage.range.end_ms {
                     break;
                 }
-                if day.start_ms <= coverage.range.start_ms && coverage.range.end_ms <= day.end_ms {
-                    totals.add(&coverage);
-                    metrics.add(&coverage);
-                } else if let Some(clipped) =
-                    day.clip(coverage.range.start_ms, coverage.range.end_ms)
+                if day.range.start_ms <= coverage.range.start_ms
+                    && coverage.range.end_ms <= day.range.end_ms
+                {
+                    day.add(&coverage, now, &mut bytes)?;
+                } else if let Some(clipped) = day
+                    .range
+                    .clip(coverage.range.start_ms, coverage.range.end_ms)
                 {
                     let piece = Coverage {
                         range: clipped,
@@ -490,8 +685,7 @@ impl Queries {
                         }),
                         ..coverage.clone()
                     };
-                    totals.add(&piece);
-                    metrics.add(&piece);
+                    day.add(&piece, now, &mut bytes)?;
                 }
             }
             Ok(())
@@ -500,12 +694,7 @@ impl Queries {
             resolved,
             days: days
                 .into_iter()
-                .map(|(date, range, totals, metrics)| DayFocusMetrics {
-                    date: date.to_string(),
-                    range,
-                    totals,
-                    metrics: metrics.finish(),
-                })
+                .map(|day| day.finish(&self.settings.categories))
                 .collect(),
         })
     }
