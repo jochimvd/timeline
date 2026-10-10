@@ -388,6 +388,7 @@ Read-only tools:
 | Tool | Arguments |
 | --- | --- |
 | `overview` | `date` (YYYY-MM-DD) **or** `range: {start_ms, end_ms}`, optional `cursor`, `limit` |
+| `categories` | none; the configured category rules |
 | `blocks` / `observations` | `range`, optional `cursor`, `limit` |
 | `observation` | original observation `id` |
 | `screenshots` | `range`, optional `monitor`, `cursor`, `limit` |
@@ -398,7 +399,9 @@ are tool results with `isError: true` and an explicit error code. Unknown tools
 and malformed arguments are JSON-RPC errors. Read metadata first, follow all
 continuation cursors, and fetch images only where useful. Focus is evidence rather
 than task attribution; keep ambiguity unassigned, gaps unknown, and avoid counting
-the same elapsed time once per monitor. Tasks, estimates and corrections belong
+the same elapsed time once per monitor. Overview category totals and the category on
+blocks and exact titles are the user's own classification and a useful starting
+point, but they are not task attribution either. Tasks, estimates and corrections belong
 in the agent conversation.
 
 Query admission remains two expensive reads globally, at most one from MCP.

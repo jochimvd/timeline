@@ -597,12 +597,16 @@ fn tool_definitions() -> Value {
         json!({"cursor":{"type":"string"},"limit":{"type":"integer","minimum":1,"maximum":500}});
     let overview = format!(
         "Overview of an activity date (04:00 {}) or half-open range, at most 31 days. \
-        Page all breakdown rows. Focus includes idle; gaps are unknown, not task time.",
+        Page all breakdown rows: category totals (every configured category in order, then \
+        uncategorized as category null), application and exact-title totals (titles carry \
+        their category), then focus and screenshot coverage. Focus includes idle; gaps are \
+        unknown, not task time.",
         crate::config::activity_timezone()
     );
     let tools: Vec<Value> = [
         ("overview", overview.as_str(), vec![]),
-        ("blocks", "Activity blocks in a half-open range up to 48 hours. Stable block and observation references; grouping is not task attribution.", vec!["range"]),
+        ("categories", "The user's category definitions: ordered rules matching an exact application and/or a regex over the cleaned window title; the first matching category applies. Categories classify observed focus; they are hints, not task attribution.", vec![]),
+        ("blocks", "Activity blocks in a half-open range up to 48 hours, each with its category (null when uncategorized). Stable block and observation references; grouping is not task attribution.", vec!["range"]),
         ("observations", "Original window observations in a range up to 48 hours. Page before inferring tasks.", vec!["range"]),
         ("observation", "Retrieve one original observation by its stable ID; expired evidence is unavailable.", vec!["id"]),
         ("screenshots", "List screenshot metadata in a range up to 48 hours, optionally by monitor. Retrieve only selected images.", vec!["range"]),
@@ -665,7 +669,7 @@ async fn mcp(State(state): State<Arc<Web>>, headers: HeaderMap, body: Bytes) -> 
             else {
                 return rpc_error(id, -32602, "Missing protocolVersion");
             };
-            json!({"protocolVersion":if VERSIONS.contains(&version) {version} else {"2025-11-25"},"capabilities":{"tools":{}},"serverInfo":{"name":"timeline","version":env!("CARGO_PKG_VERSION")},"instructions":"Read metadata first. Focus is not task time. Keep ambiguity unassigned and gaps unknown. Do not double count monitors; cite evidence IDs. Tasks and corrections belong in conversation."})
+            json!({"protocolVersion":if VERSIONS.contains(&version) {version} else {"2025-11-25"},"capabilities":{"tools":{}},"serverInfo":{"name":"timeline","version":env!("CARGO_PKG_VERSION")},"instructions":"Read metadata first. Focus is not task time; categories are the user's rule-based focus classification, useful hints but not task attribution. Keep ambiguity unassigned and gaps unknown. Do not double count monitors; cite evidence IDs. Tasks and corrections belong in conversation."})
         }
         "ping" => json!({}),
         "tools/list" => tool_definitions(),
@@ -675,7 +679,13 @@ async fn mcp(State(state): State<Arc<Web>>, headers: HeaderMap, body: Bytes) -> 
             };
             if !matches!(
                 name,
-                "overview" | "blocks" | "observations" | "observation" | "screenshots" | "image"
+                "overview"
+                    | "categories"
+                    | "blocks"
+                    | "observations"
+                    | "observation"
+                    | "screenshots"
+                    | "image"
             ) {
                 return rpc_error(id, -32602, "Unknown read-only tool");
             }

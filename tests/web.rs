@@ -303,7 +303,7 @@ async fn authentication_bootstrap_origin_host_and_read_only_mcp() {
     let init = rpc(&app,&bearer,"initialize",json!({"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"test","version":"1"}})).await.1;
     assert_eq!(init["result"]["protocolVersion"], "2025-11-25");
     let list = rpc(&app, &bearer, "tools/list", json!({})).await.1;
-    assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 6);
+    assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 7);
     assert!(
         list["result"]["tools"]
             .as_array()
@@ -411,6 +411,64 @@ async fn adapters_share_paged_history_gaps_empty_days_and_retention_invalidation
         .await["isError"],
         true
     );
+}
+#[tokio::test]
+async fn browser_and_mcp_share_configured_categories_and_reload_edits() {
+    let dir = tempfile::tempdir().unwrap();
+    fixture(dir.path());
+    let config = tempfile::tempdir().unwrap();
+    let settings = config.path().join("config.toml");
+    std::fs::write(
+        &settings,
+        "[[categories]]\nname = 'Coding'\n[[categories.rules]]\napplication = 'editor'\n",
+    )
+    .unwrap();
+    let web = Web::configured(dir.path(), HOST, Some(settings.clone())).unwrap();
+    let app = web.router();
+    let cookie = session(&app, &web).await;
+    let bearer = format!("Bearer {}", secret(dir.path()).unwrap());
+    let args = json!({"range":{"start_ms":0,"end_ms":10000},"limit":500});
+    let overview = tool(&app, &bearer, "overview", args.clone()).await["structuredContent"].clone();
+    assert_eq!(
+        overview,
+        browser(&app, &cookie, "overview", args.clone()).await.1
+    );
+    let first = &overview["breakdown"]["items"][0];
+    assert_eq!(
+        (
+            &first["kind"],
+            &first["category"],
+            &first["palette"],
+            &first["elapsed_ms"]
+        ),
+        (
+            &json!("category"),
+            &json!("Coding"),
+            &json!(1),
+            &json!(5000)
+        )
+    );
+    let blocks = tool(&app, &bearer, "blocks", args.clone()).await["structuredContent"].clone();
+    assert_eq!(blocks["items"][0]["category"], "Coding");
+    let list = tool(&app, &bearer, "categories", json!({})).await["structuredContent"].clone();
+    assert_eq!(
+        list,
+        browser(&app, &cookie, "categories", json!({})).await.1
+    );
+    assert_eq!(list["categories"][0]["rules"][0]["application"], "editor");
+    assert!(list["problem"].is_null());
+
+    // An invalid edit is reported and ignored; analysis falls back to uncategorized.
+    std::fs::write(
+        &settings,
+        "[[categories]]\nname = 'Coding'\ncolor = 'green'\n",
+    )
+    .unwrap();
+    let list = tool(&app, &bearer, "categories", json!({})).await["structuredContent"].clone();
+    assert!(list["problem"].as_str().unwrap().contains("color"));
+    assert_eq!(list["categories"], json!([]));
+    let blocks = tool(&app, &bearer, "blocks", args).await["structuredContent"].clone();
+    assert!(blocks["items"][0]["category"].is_null());
 }
 #[tokio::test]
 async fn selected_images_missing_files_expiry_and_shared_busy_limits() {
