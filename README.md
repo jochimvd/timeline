@@ -110,6 +110,10 @@ own client class rather than accepting it from a request. The service offers:
   Each day matches the overview metrics of that day.
 - `categories`: the configured [categories](#categories) and their rules, plus
   the reason the settings file was ignored, if it was invalid.
+- `commits`: the user's own [git commits](#git-commits) in an activity date,
+  consecutive dates or range of at most 31 days, with commits per activity day and
+  the repositories that could not be read. `repositories` lists the configured
+  paths and the repositories found under them.
 - `overview_display`: optional display-point budget (1–2048) for lossy timeline
   coverage. The browser sends `display_points` to the overview endpoint. Totals
   remain exact; the default overview and MCP contract continue to return originals.
@@ -183,7 +187,8 @@ contract is exercised through real temporary SQLite histories in `tests/queries.
 Window titles often carry noise such as an AI tool's progress spinner or an
 editor's unsaved marker, which splits one window into many exact titles. Rules in
 `$XDG_CONFIG_HOME/timeline/config.toml` (default `~/.config/timeline/config.toml`)
-clean titles before analysis:
+clean titles before analysis (the same file configures [categories](#categories)
+and [git commits](#git-commits)):
 
 ```toml
 # Spinner and status glyphs set by terminal AI tools, in any application.
@@ -202,7 +207,7 @@ title is trimmed. Cleaned titles are used by focus coverage, activity blocks,
 overviews and the timeline, in the browser and over MCP. Recorded observations keep
 the raw title, so rules apply to all retained history and can be changed at any
 time. The recorder rereads the file when it changes; an invalid file is logged and
-ignored as a whole (title rules and categories). Changing rules changes block IDs;
+ignored as a whole (title rules, categories and git paths), with the reason shown in the browser and over MCP. Changing rules changes block IDs;
 continuing an analysis listing from before the change returns
 `QueryError::CursorInvalidated`.
 
@@ -298,6 +303,61 @@ restart, suspend) and `unknown_ms` (no evidence), with the merged `intervals`
 of each kind and gap `reason`. Gaps and unknown time count only up to the time of
 the query, so the future of the current day is none of them and the totals add up
 to its elapsed part. Subject and evidence entries share the 8 MiB breakdown budget.
+
+### Git commits
+
+Commits show when the user saved work in a repository, beside recorded focus. List
+directories to search for repositories in the same file:
+
+```toml
+[git]
+paths = ["~/work"]               # searched recursively; ~ is the home directory
+# authors = ["me@example.com"]   # extra author emails that are yours
+# depth = 8                      # directory levels searched below each path (1–16)
+```
+
+Repositories are found up to `depth` levels below each path, including nested
+checkouts, work trees and submodules (`.git` files). Hidden directories and
+`node_modules`, `target`, `venv`, `site-packages`, `__pycache__` and
+`bower_components` are skipped, symbolic links are not followed, a search visits
+at most 50,000 directories, and a repository reached through several work trees is
+listed once, named after its main work tree relative to the configured path. The
+search is reused for five minutes (or until the paths change). Empty `.git`
+directories, such as container mount points, are ignored; broken `.git` files and
+directories without `HEAD` are reported.
+
+A commit is the user's when its author email is the repository's effective
+`user.email` (as `git config user.email` reports it, including conditional
+includes such as `includeIf "gitdir:~/work/"`) or one of `authors`, compared
+case-insensitively. A repository without either is reported.
+
+Times come from the reflog, which records when a commit was made in this clone;
+author and committer dates can be days off after rebases and cherry-picks. Counted
+reflog events are those that create a commit here: `commit` (including initial,
+amend, merge and cherry-pick conflict resolutions), `cherry-pick`, `revert`, `am`,
+and a `merge` or `pull` that made a merge commit. Rebases, resets, checkouts,
+fetches, pulls and fast-forwards only move existing commits and are not counted,
+so a rebased branch keeps its commits where they were first made, under their
+original hashes. A commit in several reflogs (HEAD, its branch, other work trees)
+counts once, with the branch from the branch reflog; a detached commit has no
+branch. An amend replaces the commit it amended: it appears once, at its final
+version, with `amends` and the time the original was made (`first_ms`). Only the
+newest 8 MiB of a reflog is read. A repository without reflogs
+(`core.logAllRefUpdates = false`) falls back to committer dates across all refs,
+which also counts commits fetched from elsewhere; its commits say `timing:
+"committer_date"` instead of `"reflog"`.
+
+Commits are read at query time and never recorded, retained or cached beyond
+memory: reflogs are plain files, read only if modified since the range began;
+author and subject come from one `git cat-file --batch` per repository with
+commits in range, and `user.email` from `git config`. Commit objects are cached
+in memory, identities for five minutes. Git runs read-only with
+`--no-optional-locks`, no prompts or pager, for at most 3 seconds and 16 MiB of
+output per command and 8 seconds per query; a repository that fails or is skipped
+is reported in `problems` without failing the others, and its commits are missing
+rather than absent. Commit queries take a query admission slot like other
+evidence reads. A commit list over 1 MiB returns `LimitExceeded`. Commits are
+evidence that work on a repository was saved at a moment, not task attribution.
 
 ## Screenshot capture
 
@@ -491,6 +551,8 @@ Read-only tools:
 | `overview` | `date` (YYYY-MM-DD) **or** `dates: {first, last}` (inclusive) **or** `range: {start_ms, end_ms}`, optional `cursor`, `limit` |
 | `focus_metrics` | `date`, `dates` **or** `range` (at most 31 days); per-day totals, focus by category/application, [evidence](#day-evidence) and [focus metrics](#focus-metrics) |
 | `categories` | none; the configured category rules |
+| `commits` | `date`, `dates` **or** `range` (at most 31 days); the user's [git commits](#git-commits) and commits per day |
+| `repositories` | none; configured git paths, repositories found and problems |
 | `blocks` / `observations` | `range`, optional `cursor`, `limit` |
 | `observation` | original observation `id` |
 | `screenshots` | `range`, optional `monitor`, `cursor`, `limit` |
@@ -503,7 +565,9 @@ continuation cursors, and fetch images only where useful. Focus is evidence rath
 than task attribution; keep ambiguity unassigned, gaps unknown, and avoid counting
 the same elapsed time once per monitor. Overview category totals and the category on
 blocks and exact titles are the user's own classification and a useful starting
-point, but they are not task attribution either. Focus metrics (in `overview` and
+point, but they are not task attribution either. Commits are the user's own work
+saved in a repository at a moment, useful to name the task behind focus, but not
+task time; `problems` names repositories whose commits are missing. Focus metrics (in `overview` and
 per day in `focus_metrics`) describe observed switching and sustained focus, not
 productivity. A day without observed evidence is missing evidence rather than a
 day without activity; comparisons should use periods of equal length and name

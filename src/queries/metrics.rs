@@ -633,31 +633,16 @@ impl Queries {
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |elapsed| elapsed.as_millis() as i64);
         let mut days = Vec::new();
-        let start = self
-            .timezone
-            .timestamp_millis_opt(range.start_ms)
-            .single()
-            .ok_or(QueryError::InvalidRequest)?
-            .naive_local()
-            - chrono::Duration::hours(4);
-        let mut date = start.date();
-        loop {
-            let day = self.resolve(Selection::ActivityDate(date))?.range;
-            if day.start_ms >= range.end_ms {
-                break;
-            }
-            if let Some(clipped) = range.clip(day.start_ms, day.end_ms) {
-                days.push(Day {
-                    date,
-                    range: clipped,
-                    totals: Totals::default(),
-                    categories: HashMap::new(),
-                    applications: HashMap::new(),
-                    evidence: DayEvidence::default(),
-                    metrics: self.metrics(clipped),
-                });
-            }
-            date = date.succ_opt().ok_or(QueryError::InvalidRequest)?;
+        for (date, clipped) in self.activity_days(range)? {
+            days.push(Day {
+                date,
+                range: clipped,
+                totals: Totals::default(),
+                categories: HashMap::new(),
+                applications: HashMap::new(),
+                evidence: DayEvidence::default(),
+                metrics: self.metrics(clipped),
+            });
         }
         let _permit = self.admit(client)?;
         let _snapshot = self.history.connection.unchecked_transaction()?;

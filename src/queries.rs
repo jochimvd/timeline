@@ -24,6 +24,7 @@ use std::{
     },
 };
 
+mod commits;
 mod coverage;
 mod display;
 mod images;
@@ -34,6 +35,7 @@ mod paging;
 mod scan;
 mod segments;
 mod updates;
+pub use commits::{CommitDay, CommitList, RepositoryList};
 use coverage::is_boundary;
 pub use display::{DisplayFocus, DisplayImage};
 use images::ImageContext;
@@ -439,6 +441,29 @@ impl Queries {
             range,
             timezone: self.timezone.to_string(),
         })
+    }
+    /// The activity days intersecting `range`, each clipped to it.
+    fn activity_days(&self, range: Range) -> Result<Vec<(NaiveDate, Range)>> {
+        let mut days = Vec::new();
+        let mut date = self
+            .timezone
+            .timestamp_millis_opt(range.start_ms)
+            .single()
+            .ok_or(QueryError::InvalidRequest)?
+            .naive_local()
+            .checked_sub_signed(chrono::Duration::hours(4))
+            .ok_or(QueryError::InvalidRequest)?
+            .date();
+        loop {
+            let day = self.resolve(Selection::ActivityDate(date))?.range;
+            if day.start_ms >= range.end_ms {
+                return Ok(days);
+            }
+            if let Some(clipped) = range.clip(day.start_ms, day.end_ms) {
+                days.push((date, clipped));
+            }
+            date = date.succ_opt().ok_or(QueryError::InvalidRequest)?;
+        }
     }
     fn admit(&self, client: Client) -> Result<Permit> {
         self.check_cancelled()?;
