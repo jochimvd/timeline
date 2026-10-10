@@ -1,39 +1,37 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import Timeline from "./Timeline.svelte";
+  import DayView from "./DayView.svelte";
   import StorageDetails from "./StorageDetails.svelte";
-  import Breakdown from "./Breakdown.svelte";
-  import EvidenceViewer from "./EvidenceViewer.svelte";
   import { createTimelineApp } from "./model";
-  import type { Range } from "./types";
+  import { createRecording } from "./recording";
+  import { startSession } from "./session";
   const app = createTimelineApp();
-  const view = app.state;
-  onMount(() => { void app.start(); return app.dispose; });
-  /** Shows a range such as the longest stretch on the timeline, moving focus there. */
-  function reveal(range: Range) {
-    const timeline = document.getElementById("timeline");
-    timeline?.focus({ preventScroll: true });
-    timeline?.scrollIntoView({ behavior: "smooth", block: "center" });
-    void app.reveal(range);
-  }
+  const day = app.state;
+  const recording = createRecording();
+  const status = recording.state;
+  let error = $state("");
+  onMount(() => {
+    const lifetime = new AbortController();
+    startSession(lifetime.signal).then(session => {
+      void app.start(session);
+      void recording.start();
+    }).catch(failure => {
+      if (!lifetime.signal.aborted) error = failure instanceof Error ? failure.message : String(failure);
+    });
+    return () => { lifetime.abort(); app.dispose(); recording.dispose(); };
+  });
 </script>
 
 <main>
   <header class="app-header">
     <div><span class="eyebrow">DESKTOP ACTIVITY</span><h1>Your activity, recalled.</h1></div>
     <section class="status" aria-label="Recording">
-      <span id="recording">{$view.recording}</span>
-      <button id="pause" disabled={$view.recordingBusy} onclick={() => void app.toggleRecording()}>{$view.paused ? "Resume recording" : "Pause recording"}</button>
+      <span id="recording">{$status.label}</span>
+      <button id="pause" disabled={$status.busy} onclick={() => void recording.toggle()}>{$status.paused ? "Resume recording" : "Pause recording"}</button>
     </section>
   </header>
-  <p id="message" role="status">{$view.message}</p>
-  <section class="panel">
-    <Timeline view={$view} {app} />
-  </section>
-  <EvidenceViewer view={$view} {app} />
-  <Breakdown rows={$view.rows} categories={$view.categories} totals={$view.totals} metrics={$view.metrics}
-    range={$view.loadedRange} timezone={$view.timezone} settingsPath={$view.settingsPath}
-    loading={$view.dayLoading || $view.rangeLoading} onreveal={reveal} />
+  <p id="message" role="status">{error || $status.error || $day.message}</p>
+  <DayView {app} />
   <StorageDetails />
   <footer>Activity days begin at 04:00. Closing this page leaves recording running.</footer>
 </main>

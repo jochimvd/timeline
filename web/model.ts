@@ -1,5 +1,7 @@
 import { writable, readonly } from "svelte/store";
-import { request, query, pages } from "./api";
+import { query, pages } from "./api";
+import type { Session } from "./session";
+import { activityDate as activityDateIn, addDays } from "./dates";
 import { createImageLoader, createImagePool, type ImageFrame } from "./images";
 import type { Range, Block, CategoryRow, Coverage, FocusMetrics, Overview, Shot, Evidence, OverviewUpdates } from "./types";
 
@@ -28,14 +30,7 @@ export type View = {
   evidenceTime: number | null;
   hoverEvidence: { time: number | null; focus: Coverage[]; frames: ImageFrame[] | null; error: string; loading: boolean };
   evidenceError: string; message: string;
-  recording: string; paused: boolean; recordingBusy: boolean;
 };
-type Status = {
-  recording: { manual_paused: boolean; locked: boolean; connected: boolean; screenshot_pressure?: boolean };
-  desktop_error?: string; screenshot_error?: string;
-};
-// Intl formatter construction is expensive; activity dates share one per timezone.
-const activityFormatters = new Map<string, Intl.DateTimeFormat>();
 
 /** All asynchronous transitions publish complete view state; views never manage requests. */
 export function createTimelineApp() {
@@ -45,7 +40,6 @@ export function createTimelineApp() {
     evidenceLoading: false, blocks: [], rows: [], categories: [], focus: [], shots: [], frames: null,
     hoverEvidence: { time: null, focus: [], frames: null, error: "", loading: false },
     evidenceTime: null, evidenceError: "", message: "",
-    recording: "Connecting…", paused: false, recordingBusy: true,
   };
   const store = writable(view);
   const patch = (values: Partial<View>) => { view = { ...view, ...values }; store.set(view); };
@@ -58,8 +52,10 @@ export function createTimelineApp() {
   let rangeGeneration = 0, selectionGeneration = 0;
   let rangeAbort = new AbortController(), selectionAbort = new AbortController();
   const lifetime = new AbortController();
+  /** Whether the day view is shown; hidden views do not poll for live updates. */
+  let active = true;
   let navigationAbort = new AbortController();
-  let statusTimer: ReturnType<typeof setInterval> | undefined;
+  let refreshTimer: ReturnType<typeof setInterval> | undefined;
   let hoverTimer: ReturnType<typeof setTimeout> | undefined;
   let rangeTimer: ReturnType<typeof setTimeout> | undefined;
   let hoverTime = 0;
@@ -154,7 +150,7 @@ export function createTimelineApp() {
     }
   }
   async function refresh() {
-    if (disposed || document.hidden || !view.visible || view.dayLoading || view.rangeLoading || refreshing || !revision) return;
+    if (disposed || !active || document.hidden || !view.visible || view.dayLoading || view.rangeLoading || refreshing || !revision) return;
     refreshing = true;
     const generation = rangeGeneration, signal = rangeAbort.signal;
     const args = { range: { ...view.visible }, display_points: displayPoints, since: revision, limit: 500 };
@@ -352,19 +348,7 @@ export function createTimelineApp() {
     setVisible((start_ms + end_ms) / 2 + direction * (end_ms - start_ms) / 2);
     settleRange();
   }
-  function activityDate(ms: number) {
-    let formatter = activityFormatters.get(view.timezone);
-    if (!formatter) {
-      formatter = new Intl.DateTimeFormat("en-CA", { timeZone: view.timezone,
-        year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", hourCycle: "h23" });
-      activityFormatters.set(view.timezone, formatter);
-    }
-    const parts = formatter.formatToParts(ms);
-    const part = (type: string) => parts.find(part => part.type === type)!.value;
-    const date = new Date(`${part("year")}-${part("month")}-${part("day")}T12:00:00Z`);
-    if (Number(part("hour")) < 4) date.setUTCDate(date.getUTCDate() - 1);
-    return date.toISOString().slice(0, 10);
-  }
+  const activityDate = (ms: number) => activityDateIn(ms, view.timezone);
   function settleRange() {
     if (!view.visible) return;
     const center = (view.visible.start_ms + view.visible.end_ms) / 2;
@@ -437,11 +421,7 @@ export function createTimelineApp() {
     } catch (error) { failure(error); }
     finally { if (!signal.aborted) patch({ navigationBusy: false }); }
   }
-  function shiftDate(delta: number) {
-    const date = new Date(view.date + "T12:00:00Z");
-    date.setUTCDate(date.getUTCDate() + delta);
-    void loadDay(date.toISOString().slice(0, 10));
-  }
+  function shiftDate(delta: number) { void loadDay(addDays(view.date, delta)); }
   async function layout(value: string) {
     patch({ layout: value });
     // Reselect if a query is pending so layout cannot cancel missing evidence.
@@ -458,51 +438,29 @@ export function createTimelineApp() {
     } catch (error) { if (generation === selectionGeneration) failure(error); }
     finally { if (generation === selectionGeneration) patch({ evidenceLoading: false }); }
   }
-  async function status() {
+  /** Opens the day view on `date`, or on the newest capture's activity day. */
+  async function start(session: Session, date?: string) {
+    patch({ timezone: session.timezone, settingsPath: session.settingsPath });
+    refreshTimer = setInterval(() => void refresh(), 5000);
+    document.addEventListener("visibilitychange", becameVisible);
+    window.addEventListener("focus", becameVisible);
     try {
-      const s = await request<Status>("/api/status", undefined, lifetime.signal);
-      if (disposed) return;
-      let recording = s.recording.manual_paused ? "Recording paused" : s.recording.locked
-        ? "Screen locked" : !s.recording.connected ? "Desktop disconnected" : "Recording";
-      if (s.desktop_error || s.screenshot_error || s.recording.screenshot_pressure) recording += " · recording degraded";
-      patch({ recording, paused: s.recording.manual_paused, recordingBusy: false });
-    } catch {
-      if (!disposed) patch({ recording: "Recording status unavailable", recordingBusy: true });
-    }
-  }
-  async function toggleRecording() {
-    patch({ recordingBusy: true });
-    try { await request("/api/recording/" + (view.paused ? "resume" : "pause"), {}, lifetime.signal); }
-    catch (error) { failure(error); }
-    await status();
-  }
-  async function start() {
-    const token = location.hash.slice(1);
-    history.replaceState(null, "", "/");
-    try {
-      if (token) await request("/bootstrap", { token }, lifetime.signal);
-      const config = await request<{ timezone: string; settings: string | null }>("/api/config", undefined, lifetime.signal);
-      if (disposed) return;
-      patch({ timezone: config.timezone, settingsPath: config.settings });
+      if (date) { await loadDay(date); return; }
       // Find the newest available capture across activity days, including when
       // recording is paused. Explicit navigation during startup takes priority.
-      if (!view.date) {
-        const latest = await query<number | null>("adjacent_screenshot", {
-          selected_ms: Date.now() + 1, direction: -1,
-        }, lifetime.signal);
-        if (disposed) return;
-        if (!view.date) {
-          if (latest === null) await loadDay(activityDate(Date.now()));
-          else await loadDay(activityDate(latest), undefined, latest);
-        }
-      }
-      await status();
-      if (!disposed) {
-        statusTimer = setInterval(() => { void status(); void refresh(); }, 5000);
-        document.addEventListener("visibilitychange", becameVisible);
-        window.addEventListener("focus", becameVisible);
-      }
+      const latest = await query<number | null>("adjacent_screenshot", {
+        selected_ms: Date.now() + 1, direction: -1,
+      }, lifetime.signal);
+      if (disposed || view.date) return;
+      if (latest === null) await loadDay(activityDate(Date.now()));
+      else await loadDay(activityDate(latest), undefined, latest);
     } catch (error) { failure(error); }
+  }
+  /** Shows or hides the day view; hiding stops hover work and live polling. */
+  function setActive(value: boolean) {
+    active = value;
+    if (!value) leave();
+    else void refresh();
   }
   function dispose() {
     disposed = true;
@@ -512,13 +470,13 @@ export function createTimelineApp() {
     leave();
     lifetime.abort();
     navigationAbort.abort();
-    clearInterval(statusTimer);
+    clearInterval(refreshTimer);
     cancelRangeTimer();
     document.removeEventListener("visibilitychange", becameVisible);
     window.removeEventListener("focus", becameVisible);
     images.clear();
     hoverImages.clear();
   }
-  return { state: readonly(store), start, dispose, loadDay, select, hover, leave, zoom, pan, panTo, setWidth, shiftDate, jumpNow, reveal, fitActivity, stepScreenshot, stepZoom, navigateTo, layout, toggleRecording };
+  return { state: readonly(store), start, dispose, loadDay, select, hover, leave, zoom, pan, panTo, setWidth, shiftDate, jumpNow, reveal, fitActivity, stepScreenshot, stepZoom, navigateTo, layout, setActive, activityDate };
 }
 export type TimelineApp = ReturnType<typeof createTimelineApp>;

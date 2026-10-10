@@ -6,6 +6,8 @@
   import { applicationSwatch, categorySwatch, clockRange, coverageBands, duration, swatchStyle, time, imageTransform, UNCATEGORIZED, type Swatch } from "./format";
   import { hourSwitches, plural, SWITCH_LEVELS, switchLevel, switchLevelLabel } from "./metrics";
   import { zoomLevels, type TimelineApp, type View } from "./model";
+  import { colorBy } from "./preferences";
+  import ColorBy from "./ColorBy.svelte";
   import type { Block, Range } from "./types";
   let { view, app }: { view: View; app: TimelineApp } = $props();
   const blocks = $derived(view.blocks);
@@ -14,12 +16,9 @@
   const timezone = $derived(view.timezone);
   let expanded = $state(false);
   // Lanes and fills follow either the application or the configured category.
-  const colorStorage = "timeline.colorBy";
-  let colorBy = $state<"application" | "category">(localStorage.getItem(colorStorage) === "category" ? "category" : "application");
-  $effect(() => localStorage.setItem(colorStorage, colorBy));
   const categoryRows = $derived(new Map(view.categories.map(row => [row.category, row])));
   const configured = $derived(view.categories.some(row => row.category !== null));
-  const mode = $derived(configured ? colorBy : "application");
+  const mode = $derived(configured ? $colorBy : "application");
   const categorySwatchOf = (category: string | null) => categorySwatch(category === null ? undefined : categoryRows.get(category));
   const blockSwatch = (block: Block): Swatch => mode === "category"
     ? categorySwatchOf(block.category) : applicationSwatch(block.group.application);
@@ -220,13 +219,7 @@
         </select>
       </label>
     </div>
-    {#if configured}<fieldset class="segmented" id="color-by">
-      <legend>Color by</legend>
-      <div class="segmented-options">
-        <label><input type="radio" name="color-by" value="application" bind:group={colorBy} />Application</label>
-        <label><input type="radio" name="color-by" value="category" bind:group={colorBy} />Category</label>
-      </div>
-    </fieldset>{/if}
+    {#if configured}<ColorBy />{/if}
     <button id="lanes" class="lanes-toggle" aria-expanded={expanded} onclick={() => expanded = !expanded}>{expanded ? "▾" : "▸"} {mode === "category" ? "Category" : "Application"} lanes</button>
   </div>
 </nav>

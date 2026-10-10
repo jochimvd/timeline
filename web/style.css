@@ -788,6 +788,16 @@ body:has(#enlarged[open]) {
   font-weight: 400;
   color: var(--text-secondary);
 }
+.stat-delta {
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+  font-variant-numeric: tabular-nums;
+}
+.stat-delta > span[aria-hidden] {
+  font-size: 9px;
+  margin-right: 2px;
+  vertical-align: 1px;
+}
 .stat-detail {
   color: var(--text-muted);
   font-size: var(--text-sm);

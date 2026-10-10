@@ -1,6 +1,7 @@
 <script lang="ts">
   import { query } from "./api";
   import FocusPatterns from "./FocusPatterns.svelte";
+  import StatTile from "./StatTile.svelte";
   import { applicationSwatch, captureTime, categorySwatch, clockRange, duration, swatchStyle, UNCATEGORIZED, type Swatch } from "./format";
   import { plural } from "./metrics";
   import type { CategoryList, CategoryRow, Coverage, FocusMetrics, FocusSubject, Overview, Range } from "./types";
@@ -61,6 +62,10 @@
   $effect(() => () => listAbort?.abort());
 </script>
 
+{#snippet showLongest()}
+  <button class="link-button" onclick={() => longest && onreveal(longest.range)}>Show on timeline</button>
+{/snippet}
+
 {#snippet ranking(items: Entry[], id: string)}
   <ol {id} class="focus-ranking">
     {#each items as entry (entry.key)}
@@ -87,33 +92,28 @@
   </div>
   {#if totals && totals.focus_ms > 0}
     <dl id="totals" class="stat-tiles">
-      <div class="stat-tile">
-        <dt>Recorded focus</dt>
-        <dd class="stat-value">{duration(totals.focus_ms)}</dd>
-        <dd class="stat-detail">{duration(totals.idle_ms)} idle{#if metrics}{` · ${duration(metrics.active_ms)} active`}{/if}</dd>
-      </div>
+      <StatTile label="Recorded focus">
+        {duration(totals.focus_ms)}
+        {#snippet detail()}{duration(totals.idle_ms)} idle{#if metrics}{` · ${duration(metrics.active_ms)} active`}{/if}{/snippet}
+      </StatTile>
       {#if metrics}
-        <div class="stat-tile" id="switch-rate">
-          <dt>Context switches</dt>
-          <dd class="stat-value">{metrics.application_switches_per_hour ?? "—"}{" "}<small>per active hour</small></dd>
-          <dd class="stat-detail">{plural(metrics.application_switches, "application switch", "application switches")}{#if metrics.category_switches !== null}{` · ${metrics.category_switches_per_hour ?? "—"}/h between categories`}{/if}</dd>
-        </div>
-        <div class="stat-tile" id="longest-stretch">
-          <dt>Longest focus stretch</dt>
-          {#if longest}
-            <dd class="stat-value">{duration(longest.elapsed_ms)}</dd>
-            <dd class="stat-detail">
+        <StatTile id="switch-rate" label="Context switches">
+          {metrics.application_switches_per_hour ?? "—"}{" "}<small>per active hour</small>
+          {#snippet detail()}{plural(metrics.application_switches, "application switch", "application switches")}{#if metrics.category_switches !== null}{` · ${metrics.category_switches_per_hour ?? "—"}/h between categories`}{/if}{/snippet}
+        </StatTile>
+        <StatTile id="longest-stretch" label="Longest focus stretch" action={longest ? showLongest : undefined}>
+          {longest ? duration(longest.elapsed_ms) : "—"}
+          {#snippet detail()}
+            {#if longest}
               <span class="category-tag"><span class="swatch" style={swatchStyle(subjectSwatch(longest.subject))}></span>{longest.subject.name}</span>
               {` · ${clockRange(longest.range, timezone)}`}{#if longest.interruptions}{` · ${plural(longest.interruptions, "brief interruption")}`}{/if}
-            </dd>
-            <dd><button class="link-button" onclick={() => onreveal(longest.range)}>Show on timeline</button></dd>
-          {:else}<dd class="stat-value">—</dd><dd class="stat-detail">No active focus</dd>{/if}
-        </div>
-        <div class="stat-tile" id="long-share">
-          <dt>In long stretches</dt>
-          <dd class="stat-value">{longShare.toFixed(0)}%</dd>
-          <dd class="stat-detail">of active focus, in {plural(metrics.stretches.long.count, "stretch", "stretches")} of 25 min or more</dd>
-        </div>
+            {:else}No active focus{/if}
+          {/snippet}
+        </StatTile>
+        <StatTile id="long-share" label="In long stretches">
+          {longShare.toFixed(0)}%
+          {#snippet detail()}of active focus, in {plural(metrics.stretches.long.count, "stretch", "stretches")} of 25 min or more{/snippet}
+        </StatTile>
       {/if}
     </dl>
     {#if metrics && metrics.active_ms > 0}

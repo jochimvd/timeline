@@ -527,11 +527,15 @@ npm run test:web
 cargo test --locked
 ```
 
-The Svelte views live in `web/App.svelte`, `Timeline.svelte`,
-`Breakdown.svelte` (with `FocusPatterns.svelte`) and `EvidenceViewer.svelte`;
-`web/metrics.ts` holds the focus-metric scales and labels. `web/model.ts` owns application
-state, request cancellation and hover scheduling; `web/images.ts` owns tile
-decoding, reuse and bitmap cleanup; `ScreenshotCanvas.svelte` owns canvas surfaces. Views render state without manually
+`web/App.svelte` is the page shell: header, recording status (`web/recording.ts`)
+and the session bootstrap (`web/session.ts`). The day view (`DayView.svelte`)
+combines `Timeline.svelte`, `EvidenceViewer.svelte` and `Breakdown.svelte` (with
+`FocusPatterns.svelte`); stat tiles share `StatTile.svelte` and the remembered
+"Color by" choice lives in `web/preferences.ts`. `web/metrics.ts` holds the
+focus-metric scales and labels and `web/dates.ts` activity-date arithmetic.
+`web/model.ts` owns day state, request cancellation and hover scheduling;
+`web/images.ts` owns tile decoding, reuse and bitmap cleanup;
+`ScreenshotCanvas.svelte` owns canvas surfaces. Views render state without manually
 rebuilding DOM trees. Range updates preserve the displayed evidence while
 replacement data loads.
 
