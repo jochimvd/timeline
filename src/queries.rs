@@ -6,7 +6,7 @@ use crate::{
     evidence::{Evidence, FocusState, StateChange},
     history::{History, ImageRead, Screenshot, ScreenshotSample},
     recording::Window,
-    titles::TitleRules,
+    settings::Settings,
 };
 use anyhow::{Result, bail};
 use chrono::{NaiveDate, TimeZone};
@@ -162,14 +162,26 @@ pub struct Block {
     pub elapsed_ms: i64,
     pub idle_ms: i64,
     pub group: GroupKey,
+    /// Category of every focus interval in the block; null when uncategorized.
+    pub category: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum FocusCoverage {
-    Focus { window: Window, idle: bool },
-    NoFocus { idle: bool },
-    Gap { reason: String },
+    Focus {
+        window: Window,
+        idle: bool,
+        /// Configured category of the cleaned window; null when uncategorized.
+        #[serde(default)]
+        category: Option<String>,
+    },
+    NoFocus {
+        idle: bool,
+    },
+    Gap {
+        reason: String,
+    },
     Unknown,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -194,6 +206,16 @@ pub struct ImageCoverage {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Breakdown {
+    /// Every configured category in configuration order, then uncategorized
+    /// focus (`category: null`) when there is any.
+    Category {
+        category: Option<String>,
+        /// Explicit `#rrggbb` color, else a 1-based categorical palette slot.
+        color: Option<String>,
+        palette: Option<u8>,
+        elapsed_ms: i64,
+        percent_of_focus: f64,
+    },
     Application {
         application: String,
         elapsed_ms: i64,
@@ -202,6 +224,7 @@ pub enum Breakdown {
     ExactTitle {
         application: String,
         title: String,
+        category: Option<String>,
         elapsed_ms: i64,
         percent_of_focus: f64,
     },
@@ -222,6 +245,11 @@ pub struct Overview {
     pub resolved: ResolvedRange,
     pub totals: Totals,
     pub breakdown: Page<Breakdown>,
+}
+#[derive(Debug, Serialize)]
+pub struct CategoryList {
+    pub categories: Vec<crate::categories::Category>,
+    pub problem: Option<String>,
 }
 #[derive(Debug, Serialize)]
 pub struct CursorEvidence {
@@ -266,7 +294,7 @@ pub struct Queries {
     history: History,
     timezone: Tz,
     grouping: Box<dyn Grouping>,
-    titles: Arc<TitleRules>,
+    settings: Arc<Settings>,
     cancelled: Option<Arc<AtomicBool>>,
 }
 impl Queries {
@@ -287,20 +315,35 @@ impl Queries {
             history: History::read(directory)?,
             timezone,
             grouping,
-            titles: Default::default(),
+            settings: Default::default(),
             cancelled: None,
         })
     }
-    /// Cleans focus titles in coverage, blocks and overviews; raw observations stay as recorded.
-    pub fn with_titles(mut self, titles: Arc<TitleRules>) -> Self {
-        self.titles = titles;
+    /// Title rules clean focus titles and categories classify focus in
+    /// coverage, blocks and overviews; raw observations stay as recorded.
+    pub fn with_settings(mut self, settings: Arc<Settings>) -> Self {
+        self.settings = settings;
         self
     }
-    /// Versions block IDs and analysis cursors by grouping and title rules.
-    fn analysis_version(&self) -> String {
-        match self.titles.version() {
+    /// Versions block IDs by grouping and title rules, which decide block extents.
+    fn block_version(&self) -> String {
+        match self.settings.titles.version() {
             "" => self.grouping.version().into(),
             titles => format!("{}+titles-{titles}", self.grouping.version()),
+        }
+    }
+    /// Versions analysis cursors and cached overviews by every analysis setting.
+    fn analysis_version(&self) -> String {
+        match self.settings.categories.version() {
+            "" => self.block_version(),
+            categories => format!("{}+categories-{categories}", self.block_version()),
+        }
+    }
+    /// Configured categories and any problem that made the settings file ignored.
+    pub fn categories(&self) -> CategoryList {
+        CategoryList {
+            categories: self.settings.categories.list().to_vec(),
+            problem: self.settings.problem.clone(),
         }
     }
     pub(crate) fn cancel_when(mut self, cancelled: Option<Arc<AtomicBool>>) -> Self {

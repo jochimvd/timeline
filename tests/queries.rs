@@ -5,6 +5,7 @@ use timeline::{
     history::{History, ScreenshotSample},
     queries::{Client::*, *},
     recording::Window,
+    settings::Settings,
 };
 
 fn range(start_ms: i64, end_ms: i64) -> Range {
@@ -200,12 +201,14 @@ fn title_rules_merge_cleaned_titles_but_observations_stay_raw() {
         );
     }
     put(&mut h, 30, 30, 1, StateChange::Focus, state(None, false));
-    let rules = timeline::titles::TitleRules::parse(
+    let rules = Settings::parse(
         "[[title_rules]]\napplication = 'editor'\npattern = '^[\\x{2800}-\\x{28FF}◑]'",
     )
     .unwrap();
     let raw = Queries::open(dir.path()).unwrap();
-    let cleaned = Queries::open(dir.path()).unwrap().with_titles(rules.into());
+    let cleaned = Queries::open(dir.path())
+        .unwrap()
+        .with_settings(rules.into());
     let blocks = |q: &Queries| {
         q.blocks(Browser, range(0, 30), page(100, None))
             .unwrap()
@@ -224,6 +227,202 @@ fn title_rules_merge_cleaned_titles_but_observations_stay_raw() {
         &observations.items[0].evidence,
         Evidence::State { state, .. } if state.focus.as_ref().unwrap().title == "⠋ Review"
     ));
+}
+
+fn window(application: &str, title: &str, idle: bool) -> FocusState {
+    let mut focus = state(Some(title), idle);
+    focus.focus.as_mut().unwrap().application = application.into();
+    focus
+}
+
+#[test]
+fn categories_classify_cleaned_focus_without_changing_blocks_or_originals() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = History::open(dir.path()).unwrap();
+    let windows = [
+        ("editor", "● queries.rs - Timeline", false),
+        ("chat", "Inbox", false),
+        ("editor", "notes.md", true),
+        ("editor", "queries.rs - Timeline", false),
+    ];
+    for (index, (application, title, idle)) in windows.into_iter().enumerate() {
+        let wall = index as i64 * 10;
+        put(
+            &mut h,
+            wall,
+            wall,
+            1,
+            StateChange::Focus,
+            window(application, title, idle),
+        );
+    }
+    put(&mut h, 40, 40, 1, StateChange::Focus, state(None, false));
+    let settings = Settings::parse(
+        r##"
+        [[title_rules]]
+        application = "editor"
+        pattern = '^●'
+
+        [[categories]]
+        name = "Timeline"
+        color = "#4f8cff"
+        [[categories.rules]]
+        application = "editor"
+        title = '- Timeline$'
+
+        [[categories]]
+        name = "Communication"
+        [[categories.rules]]
+        application = "chat"
+
+        [[categories]]
+        name = "Unused"
+        [[categories.rules]]
+        application = "game"
+        "##,
+    )
+    .unwrap();
+    let titles_only =
+        Settings::parse("[[title_rules]]\napplication = 'editor'\npattern = '^●'").unwrap();
+    let plain = Queries::open(dir.path())
+        .unwrap()
+        .with_settings(titles_only.into());
+    let q = Queries::open(dir.path())
+        .unwrap()
+        .with_settings(settings.into());
+
+    let blocks = q.blocks(Mcp, range(0, 40), page(100, None)).unwrap().items;
+    let categories: Vec<_> = blocks.iter().map(|b| b.category.as_deref()).collect();
+    assert_eq!(
+        categories,
+        [
+            Some("Timeline"),
+            Some("Communication"),
+            None,
+            Some("Timeline")
+        ]
+    );
+    let plain_blocks = plain.blocks(Mcp, range(0, 40), page(100, None)).unwrap();
+    assert!(plain_blocks.items.iter().all(|b| b.category.is_none()));
+    assert_eq!(
+        blocks.iter().map(|b| &b.id).collect::<Vec<_>>(),
+        plain_blocks.items.iter().map(|b| &b.id).collect::<Vec<_>>(),
+        "categories never change block identity"
+    );
+
+    let overview = q
+        .overview(Mcp, Selection::Range(range(0, 50)), page(500, None))
+        .unwrap();
+    let rows: Vec<_> = overview
+        .breakdown
+        .items
+        .iter()
+        .filter_map(|row| match row {
+            Breakdown::Category {
+                category,
+                color,
+                palette,
+                elapsed_ms,
+                percent_of_focus,
+            } => Some((
+                category.as_deref(),
+                color.as_deref(),
+                *palette,
+                *elapsed_ms,
+                *percent_of_focus,
+            )),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        rows,
+        [
+            (Some("Timeline"), Some("#4f8cff"), None, 20, 50.0),
+            (Some("Communication"), None, Some(1), 10, 25.0),
+            (Some("Unused"), None, Some(2), 0, 0.0),
+            (None, None, None, 10, 25.0),
+        ]
+    );
+    assert!(matches!(
+        overview.breakdown.items[0],
+        Breakdown::Category { .. }
+    ));
+    let titled: Vec<_> = overview
+        .breakdown
+        .items
+        .iter()
+        .filter_map(|row| match row {
+            Breakdown::ExactTitle {
+                title, category, ..
+            } => Some((title.as_str(), category.as_deref())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        titled,
+        [
+            ("Inbox", Some("Communication")),
+            ("notes.md", None),
+            ("queries.rs - Timeline", Some("Timeline")),
+        ]
+    );
+    assert!(overview.breakdown.items.iter().any(|row| matches!(
+        row,
+        Breakdown::FocusCoverage(Coverage {
+            focus: FocusCoverage::Focus { category: Some(category), idle: false, .. },
+            ..
+        }) if category == "Communication"
+    )));
+    let selected = q.cursor_evidence(Browser, 25, None).unwrap();
+    assert!(matches!(
+        &selected.focus[0].focus,
+        FocusCoverage::Focus {
+            category: None,
+            idle: true,
+            ..
+        }
+    ));
+    let observations = q.observations(Mcp, range(0, 10), page(100, None)).unwrap();
+    assert!(matches!(
+        &observations.items[0].evidence,
+        Evidence::State { state, .. } if state.focus.as_ref().unwrap().title == "● queries.rs - Timeline"
+    ));
+
+    // Editing categories restarts listings rather than mixing classifications.
+    let first = plain.blocks(Mcp, range(0, 40), page(1, None)).unwrap();
+    assert_error(
+        q.blocks(Mcp, range(0, 40), page(1, first.next_cursor)),
+        QueryError::CursorInvalidated,
+    );
+    let plain_overview = plain
+        .overview(Mcp, Selection::Range(range(0, 50)), page(1, None))
+        .unwrap();
+    assert_error(
+        q.overview(
+            Mcp,
+            Selection::Range(range(0, 50)),
+            page(1, plain_overview.breakdown.next_cursor),
+        ),
+        QueryError::CursorInvalidated,
+    );
+    assert!(
+        q.overview_updates(
+            Browser,
+            Selection::Range(range(0, 50)),
+            page(500, None),
+            None,
+            &plain_overview.revision,
+        )
+        .unwrap()
+        .reset
+    );
+    let list = q.categories();
+    assert_eq!(list.categories.len(), 3);
+    assert_eq!(
+        list.categories[0].rules[0].title.as_deref(),
+        Some("- Timeline$")
+    );
+    assert!(list.problem.is_none());
 }
 
 #[test]

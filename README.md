@@ -99,8 +99,11 @@ All operations take `Client::Browser` or `Client::Mcp`; adapters must supply the
 own client class rather than accepting it from a request. The service offers:
 
 - `overview`: activity date or an explicit half-open range, at most 31 days;
-  application/exact-title totals, idle/no-focus totals, and paginated independent
-  focus/image coverage. Totals include recorded idle focus and do not imply task time.
+  category/application/exact-title totals, idle/no-focus totals, and paginated
+  independent focus/image coverage. Totals include recorded idle focus and do not
+  imply task time.
+- `categories`: the configured [categories](#categories) and their rules, plus
+  the reason the settings file was ignored, if it was invalid.
 - `overview_display`: optional display-point budget (1–2048) for lossy timeline
   coverage. The browser sends `display_points` to the overview endpoint. Totals
   remain exact; the default overview and MCP contract continue to return originals.
@@ -193,7 +196,45 @@ title is trimmed. Cleaned titles are used by focus coverage, activity blocks,
 overviews and the timeline, in the browser and over MCP. Recorded observations keep
 the raw title, so rules apply to all retained history and can be changed at any
 time. The recorder rereads the file when it changes; an invalid file is logged and
-ignored. Changing rules changes block IDs and invalidates analysis cursors.
+ignored as a whole (title rules and categories). Changing rules changes block IDs;
+continuing an analysis listing from before the change returns
+`QueryError::CursorInvalidated`.
+
+### Categories
+
+Categories classify focus time by application and cleaned title, like project or
+activity categories in other time trackers. Define them in the same file:
+
+```toml
+[[categories]]
+name = "Timeline"
+color = "#4f8cff"          # optional
+[[categories.rules]]
+application = "code"       # optional exact window class
+title = '(?i)timeline'     # optional regex searched in the cleaned title
+[[categories.rules]]
+title = 'localhost:47831'
+
+[[categories]]
+name = "Communication"
+[[categories.rules]]
+application = "Slack"
+```
+
+A rule matches when all of its given fields match; it needs at least one. The
+first category in file order with a matching rule wins, and focus matching none
+is uncategorized. Title patterns are case-sensitive unless they start with `(?i)`.
+Categories without a `color` take the next of eight palette colors in file order
+(chosen per light/dark theme by the browser); later ones are shown in the
+neutral uncategorized color. Names must be unique and colors look like `#rrggbb`.
+
+Categories are computed at query time like title rules: nothing is stored, so
+edits re-categorize all retained history in the browser and over MCP. Every focus
+coverage interval, activity block and exact-title total carries its `category`
+(`null` when uncategorized); blocks never span two categories. Overviews start
+with one row per configured category in file order, then uncategorized focus.
+Editing categories leaves block IDs unchanged but restarts analysis listings.
+A category describes observed focus, not task attribution.
 
 ## Screenshot capture
 

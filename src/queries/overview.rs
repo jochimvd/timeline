@@ -1,6 +1,7 @@
 //! Exact totals plus original or display-resolution coverage rows. Rows are
-//! emitted as applications, exact titles, then focus and image coverage.
+//! emitted as categories, applications, exact titles, then focus and image coverage.
 use super::*;
+use crate::categories::Categories;
 
 // Immutable serialized rows keep pagination cache accounting independent of
 // Rust enum/string allocation overhead. One result is capped at 8 MiB and the
@@ -63,18 +64,23 @@ impl OverviewBuilder {
     }
 }
 
-/// Exact focus totals and per-application exact-title breakdown.
+/// Exact focus totals and per-application exact-title breakdown. A title's
+/// category is a function of its application and cleaned title.
 #[derive(Default)]
 struct Summary {
     totals: Totals,
-    titles: BTreeMap<String, BTreeMap<String, i64>>,
+    titles: BTreeMap<String, BTreeMap<String, (i64, Option<String>)>>,
     bytes: usize,
 }
 impl Summary {
     fn add(&mut self, coverage: &Coverage) -> Result<()> {
         let elapsed = coverage.elapsed_ms.unwrap_or(0);
         match &coverage.focus {
-            FocusCoverage::Focus { window, idle } => {
+            FocusCoverage::Focus {
+                window,
+                idle,
+                category,
+            } => {
                 self.totals.focus_ms += elapsed;
                 if *idle {
                     self.totals.idle_ms += elapsed;
@@ -85,13 +91,16 @@ impl Summary {
                     None => self.titles.entry(window.application.clone()).or_default(),
                 };
                 match titles.get_mut(&window.title) {
-                    Some(total) => *total += elapsed,
+                    Some((total, _)) => *total += elapsed,
                     None => {
-                        self.bytes += window.application.len() * 2 + window.title.len() + 128;
+                        self.bytes += window.application.len() * 2
+                            + window.title.len()
+                            + category.as_ref().map_or(0, String::len)
+                            + 128;
                         if self.bytes > BREAKDOWN_BYTES {
                             bail!(QueryError::LimitExceeded);
                         }
-                        titles.insert(window.title.clone(), elapsed);
+                        titles.insert(window.title.clone(), (elapsed, category.clone()));
                     }
                 }
             }
@@ -105,8 +114,9 @@ impl Summary {
         }
         Ok(())
     }
-    /// Application rows, then exact-title rows, each in name order.
-    fn rows(self) -> impl Iterator<Item = Breakdown> {
+    /// Category rows in configuration order, then application and exact-title
+    /// rows, each in name order.
+    fn rows(self, categories: &Categories) -> impl Iterator<Item = Breakdown> {
         let focus_ms = self.totals.focus_ms;
         let percent = move |elapsed| {
             if focus_ms == 0 {
@@ -115,32 +125,62 @@ impl Summary {
                 elapsed as f64 * 100.0 / focus_ms as f64
             }
         };
-        let applications: Vec<_> = self
-            .titles
+        let mut by_category: HashMap<Option<&str>, i64> = HashMap::new();
+        for (elapsed, category) in self.titles.values().flat_map(BTreeMap::values) {
+            *by_category.entry(category.as_deref()).or_default() += elapsed;
+        }
+        let uncategorized = by_category.get(&None).copied().unwrap_or(0);
+        let mut rows: Vec<_> = categories
+            .list()
             .iter()
-            .map(|(application, titles)| {
-                let elapsed_ms = titles.values().sum();
-                Breakdown::Application {
-                    application: application.clone(),
+            .map(|category| {
+                let elapsed_ms = by_category
+                    .get(&Some(category.name.as_str()))
+                    .copied()
+                    .unwrap_or(0);
+                Breakdown::Category {
+                    category: Some(category.name.clone()),
+                    color: category.color.clone(),
+                    palette: category.palette,
                     elapsed_ms,
                     percent_of_focus: percent(elapsed_ms),
                 }
             })
             .collect();
+        if uncategorized > 0 {
+            rows.push(Breakdown::Category {
+                category: None,
+                color: None,
+                palette: None,
+                elapsed_ms: uncategorized,
+                percent_of_focus: percent(uncategorized),
+            });
+        }
+        rows.extend(self.titles.iter().map(|(application, titles)| {
+            let elapsed_ms = titles.values().map(|(elapsed, _)| elapsed).sum();
+            Breakdown::Application {
+                application: application.clone(),
+                elapsed_ms,
+                percent_of_focus: percent(elapsed_ms),
+            }
+        }));
         let titles = self
             .titles
             .into_iter()
             .flat_map(move |(application, titles)| {
                 titles
                     .into_iter()
-                    .map(move |(title, elapsed_ms)| Breakdown::ExactTitle {
-                        application: application.clone(),
-                        title,
-                        elapsed_ms,
-                        percent_of_focus: percent(elapsed_ms),
-                    })
+                    .map(
+                        move |(title, (elapsed_ms, category))| Breakdown::ExactTitle {
+                            application: application.clone(),
+                            title,
+                            category,
+                            elapsed_ms,
+                            percent_of_focus: percent(elapsed_ms),
+                        },
+                    )
             });
-        applications.into_iter().chain(titles)
+        rows.into_iter().chain(titles)
     }
 }
 
@@ -204,14 +244,7 @@ impl Queries {
             .filter(display::Display::coarse);
         let _permit = self.admit(client)?;
         let _snapshot = self.history.connection.unchecked_transaction()?;
-        let cursor = self.cursor(
-            format!(
-                "{}:{}",
-                overview_scope(&resolved, points),
-                self.analysis_version()
-            ),
-            &page,
-        )?;
+        let cursor = self.analysis_cursor(&overview_scope(&resolved, points), &page)?;
         let key = self.overview_key(&cursor)?;
         let revision = encode_cursor(&Cursor {
             offset: 0,
@@ -277,7 +310,7 @@ impl Queries {
             Ok(())
         })?;
         let totals = summary.totals.clone();
-        for row in summary.rows() {
+        for row in summary.rows(&self.settings.categories) {
             emit(row)?;
         }
         if let Some(mut display) = display {

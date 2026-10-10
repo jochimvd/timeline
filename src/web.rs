@@ -1,6 +1,6 @@
 //! Authenticated loopback adapters. All evidence semantics remain in Queries.
 use crate::queries::{Client, PageRequest, Queries, QueryError, Range, Selection};
-use crate::titles::TitleRules;
+use crate::settings::Settings;
 use anyhow::{Context, Result, ensure};
 use axum::{
     Json, Router,
@@ -43,7 +43,7 @@ struct SelectionWork {
 }
 pub struct Web {
     directory: PathBuf,
-    /// Settings file with title rules for analysis; titles stay raw without one.
+    /// Settings file with title rules and categories; analysis uses neither without one.
     settings: Option<PathBuf>,
     authority: String,
     secret: String,
@@ -388,7 +388,7 @@ fn evidence(
 ) -> Result<Value> {
     let mut queries = Queries::open(&web.directory)?.cancel_when(cancelled);
     if let Some(settings) = &web.settings {
-        queries = queries.with_titles(TitleRules::load(settings));
+        queries = queries.with_settings(Settings::load(settings));
     }
     let page = PageRequest {
         cursor: a.cursor,
@@ -405,6 +405,7 @@ fn evidence(
     };
     Ok(match operation {
         "resolve_range" => serde_json::to_value(queries.resolve(selection()?)?)?,
+        "categories" => serde_json::to_value(queries.categories())?,
         "overview" => serde_json::to_value(queries.overview_display(
             client,
             selection()?,
