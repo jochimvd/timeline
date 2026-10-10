@@ -3,7 +3,7 @@
   import SuspenseBoundary from "./SuspenseBoundary.svelte";
   import { onMount } from "svelte";
   import { on } from "svelte/events";
-  import { color, coverageBands, time, imageTransform } from "./format";
+  import { applicationSwatch, categorySwatch, coverageBands, swatchStyle, time, imageTransform, UNCATEGORIZED, type Swatch } from "./format";
   import { zoomLevels, type TimelineApp, type View } from "./model";
   import type { Block, Range } from "./types";
   let { view, app }: { view: View; app: TimelineApp } = $props();
@@ -12,6 +12,22 @@
   const visible = $derived(view.visible);
   const timezone = $derived(view.timezone);
   let expanded = $state(false);
+  // Lanes and fills follow either the application or the configured category.
+  const colorStorage = "timeline.colorBy";
+  let colorBy = $state<"application" | "category">(localStorage.getItem(colorStorage) === "category" ? "category" : "application");
+  $effect(() => localStorage.setItem(colorStorage, colorBy));
+  const categoryRows = $derived(new Map(view.categories.map(row => [row.category, row])));
+  const configured = $derived(view.categories.some(row => row.category !== null));
+  const mode = $derived(configured ? colorBy : "application");
+  const categorySwatchOf = (category: string | null) => categorySwatch(category === null ? undefined : categoryRows.get(category));
+  const blockSwatch = (block: Block): Swatch => mode === "category"
+    ? categorySwatchOf(block.category) : applicationSwatch(block.group.application);
+  const blockLabel = (block: Block) => mode === "category" ? block.category ?? UNCATEGORIZED : block.group.application;
+  /** Categories present in the visible blocks, in breakdown order. */
+  const legend = $derived.by(() => {
+    const present = new Set(blocks.map(block => block.category));
+    return view.categories.filter(row => present.has(row.category));
+  });
   let timelineWidth = $state(0);
   $effect(() => app.setWidth(timelineWidth));
   let hoverTime = $state<number | null>(null);
@@ -59,7 +75,12 @@
     }
     return height;
   });
-  const applications = $derived(Array.from(new Set(blocks.map(b => b.group.application))));
+  const lanes = $derived(mode === "category"
+    ? legend.map(row => ({ key: "category:" + (row.category ?? ""), label: row.category ?? UNCATEGORIZED,
+      blocks: blocks.filter(block => block.category === row.category) }))
+    : Array.from(new Set(blocks.map(block => block.group.application)), application => ({
+      key: "application:" + application, label: application,
+      blocks: blocks.filter(block => block.group.application === application) })));
   onMount(() => {
     const timer = setInterval(() => now = Date.now(), 1000);
     return () => { clearInterval(timer); cancelPanFrame(); };
@@ -156,13 +177,17 @@
 
 <svelte:window bind:innerWidth={viewportWidth} bind:innerHeight={viewportHeight} onscroll={leave} />
 
+{#snippet categoryTag(category: string | null)}
+  <span class="category-tag"><span class="swatch" style={swatchStyle(categorySwatchOf(category))}></span>{category ?? UNCATEGORIZED}</span>
+{/snippet}
+
 {#snippet blockTrack(label: string, blocks: Block[])}
   <div class="track-label">{label}</div>
   <div class="track">
     {#each blocks as block (block.id)}
-      <div class={"block" + (block.mixed ? " mixed" : "")} style={position(block.range) + ";background:" + color(block.group.application)}
-        data-description={block.group.application + " · " + block.group.title + " · " + time(block.range.start_ms, timezone) + " – " + time(block.range.end_ms, timezone) + " · " + block.id}>
-        {block.group.application}
+      <div class={"block" + (block.mixed ? " mixed" : "")} style={position(block.range) + ";" + swatchStyle(blockSwatch(block))}
+        data-description={block.group.application + " · " + block.group.title + " · " + (block.category ?? UNCATEGORIZED) + " · " + time(block.range.start_ms, timezone) + " – " + time(block.range.end_ms, timezone) + " · " + block.id}>
+        {blockLabel(block)}
       </div>
     {/each}
   </div>
@@ -187,7 +212,14 @@
         </select>
       </label>
     </div>
-    <button id="lanes" class="lanes-toggle" aria-expanded={expanded} onclick={() => expanded = !expanded}>{expanded ? "▾" : "▸"} Application lanes</button>
+    {#if configured}<fieldset class="segmented" id="color-by">
+      <legend>Color by</legend>
+      <div class="segmented-options">
+        <label><input type="radio" name="color-by" value="application" bind:group={colorBy} />Application</label>
+        <label><input type="radio" name="color-by" value="category" bind:group={colorBy} />Category</label>
+      </div>
+    </fieldset>{/if}
+    <button id="lanes" class="lanes-toggle" aria-expanded={expanded} onclick={() => expanded = !expanded}>{expanded ? "▾" : "▸"} {mode === "category" ? "Category" : "Application"} lanes</button>
   </div>
 </nav>
 <div id="timeline" bind:clientWidth={timelineWidth} tabindex="0" role="slider" aria-label="Select time"
@@ -197,7 +229,14 @@
   class:dragging onpointermove={move} onpointerleave={leave} onpointerdown={down}
   onpointerup={end} onpointercancel={end} onlostpointercapture={end} onclick={click} onkeydown={key} use:wheelEvents>
   {#if visible}
-    {@render blockTrack("Observed focus · striped = mixed activity", blocks)}
+    {#if mode === "category"}
+      <ul class="legend" id="category-legend" aria-label="Categories">
+        {#each legend as row (row.category)}
+          <li><span class="swatch" style={swatchStyle(categorySwatch(row))}></span>{row.category ?? UNCATEGORIZED}</li>
+        {:else}<li>No focus in view</li>{/each}
+      </ul>
+    {/if}
+    {@render blockTrack(`Observed focus · by ${mode} · striped = mixed activity`, blocks)}
     <div class="track-label">Focus coverage · striped = contains unknown/gap · gold = contains idle</div>
     <div class="track">
       {#each focusBands as row}
@@ -214,15 +253,15 @@
       <div class="track-label">Screenshots · {track.monitor}</div>
       <div class="track">
         {#each track.bands as row}
-          <div class={"block" + (row.unavailable ? " gap" : "")}
-            style={position(row.range!) + (row.unavailable ? "" : ";background:#598d83")}
+          <div class={"block " + (row.unavailable ? "gap" : "image-coverage")}
+            style={position(row.range!)}
             data-description={row.unavailable || "Screenshot coverage"}>{row.unavailable || ""}</div>
         {/each}
       </div>
     {/each}
     {#if expanded}
-      {#each applications as application (application)}
-        {@render blockTrack(application, blocks.filter(b => b.group.application === application))}
+      {#each lanes as lane (lane.key)}
+        {@render blockTrack(lane.label, lane.blocks)}
       {/each}
     {/if}
     <div id="cursor" class="cursor" hidden={!inView(view.selected)} style:left={percent(view.selected) + "%"}></div>
@@ -245,11 +284,13 @@
     {#if exactFocus?.kind === "focus"}
       <strong>{exactFocus.window!.application}{exactFocus.idle ? " · idle" : ""}</strong>
       <p class="tooltip-title">{exactFocus.window!.title}</p>
+      {#if configured}{@render categoryTag(exactFocus.category ?? null)}{/if}
     {:else if exactFocus}
       <p class="tooltip-title">{exactFocus.reason || exactFocus.kind}</p>
     {:else if hoverBlock}
       <strong>{hoverBlock.mixed ? "Mixed activity" : hoverBlock.group.application}{hoverFocus?.idle ? " · idle" : ""}</strong>
       <p class="tooltip-title">{hoverBlock.group.title}</p>
+      {#if configured && !hoverBlock.mixed}{@render categoryTag(hoverBlock.category)}{/if}
     {:else}
       <p class="tooltip-title">{hoverFocus?.reason || (hoverFocus?.kind === "no_focus" ? "No focused window" : "No focus evidence at this time.")}</p>
     {/if}

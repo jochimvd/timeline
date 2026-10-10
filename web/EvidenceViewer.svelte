@@ -2,7 +2,7 @@
   import ScreenshotCanvas from "./ScreenshotCanvas.svelte";
   import SuspenseBoundary from "./SuspenseBoundary.svelte";
   import { tick } from "svelte";
-  import { time, captureTime, imageTransform } from "./format";
+  import { time, captureTime, categorySwatch, imageTransform, swatchStyle, UNCATEGORIZED } from "./format";
   import type { TimelineApp, View } from "./model";
   import type { ImageFrame } from "./images";
   let { view, app }: { view: View; app: TimelineApp } = $props();
@@ -10,6 +10,9 @@
   let enlarged = $state.raw<ImageFrame | null>(null);
   let nativeSize = $state(false);
   const frames = $derived(view.frames);
+  const configured = $derived(view.categories.some(row => row.category !== null));
+  const categorySwatchOf = (category: string | null) =>
+    categorySwatch(view.categories.find(row => row.category !== null && row.category === category));
   const monitors = $derived(Array.from(new Set(view.shots.map(s => s.screenshot.monitor))));
   const missingMonitor = $derived(view.layout.startsWith("monitor:") && !monitors.includes(view.layout.slice(8)));
   $effect(() => {
@@ -72,7 +75,8 @@
     {#each view.focus as row}
       <p title={row.focus?.window?.title}>{row.focus?.kind === "focus"
         ? row.focus.window!.application + " · " + row.focus.window!.title + (row.focus.idle ? " · idle" : "")
-        : "Focus: " + (row.focus?.reason || row.focus?.kind || "unknown")}</p>
+        : "Focus: " + (row.focus?.reason || row.focus?.kind || "unknown")}{#if configured && row.focus?.kind === "focus"}
+          <span class="category-tag"><span class="swatch" style={swatchStyle(categorySwatchOf(row.focus.category ?? null))}></span>{row.focus.category ?? UNCATEGORIZED}</span>{/if}</p>
     {:else}
       {#if view.frames !== null}No focus evidence at this time.{/if}
     {/each}

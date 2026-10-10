@@ -152,3 +152,33 @@ test("selection commits labels with images and preserves displayed evidence on r
     unsubscribe(); app.dispose(); Object.assign(globalThis, original);
   }
 });
+
+test("display blocks carry and split on categories; category totals rank by focus with uncategorized last", async () => {
+  const original = { fetch: globalThis.fetch, document: globalThis.document, window: globalThis.window };
+  globalThis.document = { removeEventListener() {} };
+  globalThis.window = { removeEventListener() {} };
+  const range = day("2026-09-22");
+  const focus = (start, end, title, category) => ({ kind: "display_focus", range: { start_ms: range.start_ms + start, end_ms: range.start_ms + end },
+    segment: 1, recording_boundary: 1, focus: { kind: "focus", window: { application: "Editor", title }, category } });
+  const category = (name, elapsed_ms, extra = {}) => ({ kind: "category", category: name, elapsed_ms, percent_of_focus: elapsed_ms / 600, ...extra });
+  globalThis.fetch = async (url, options) => {
+    const operation = url.split("/").at(-1), args = JSON.parse(options.body);
+    if (operation === "resolve_range") return Response.json({ range: day(args.date), timezone: "UTC" });
+    return Response.json({ resolved: { range: args.range, timezone: "UTC" }, revision: "r", totals: { focus_ms: 60_000, idle_ms: 0 },
+      breakdown: { next_cursor: null, truncated: false, items: [
+        category("Unused", 0, { palette: 2 }), category(null, 20_000), category("Planning", 20_000, { palette: 1 }), category("Review", 20_000, { color: "#4f8cff" }),
+        focus(0, 10_000, "plan.md", "Planning"), focus(10_000, 20_000, "plan.md", "Review"), focus(20_000, 30_000, "notes", null),
+      ] } });
+  };
+  const app = createTimelineApp();
+  let view;
+  const unsubscribe = app.state.subscribe(value => view = value);
+  try {
+    await app.loadDay("2026-09-22");
+    assert.deepEqual(view.blocks.map(block => block.category), ["Planning", "Review", null],
+      "a category change splits otherwise identical display blocks");
+    assert.deepEqual(view.categories.map(row => row.category), ["Planning", "Review", null, "Unused"]);
+  } finally {
+    unsubscribe(); app.dispose(); Object.assign(globalThis, original);
+  }
+});

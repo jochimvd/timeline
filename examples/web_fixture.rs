@@ -1,4 +1,7 @@
 //! Synthetic browser acceptance fixture. Never connects to a desktop or captures it.
+//!
+//! `cargo run --example web_fixture -- --demo [address]` instead serves a week
+//! of varied synthetic focus with demo categories, for looking at the UI.
 use std::{
     io::{BufRead, Write},
     sync::{
@@ -18,8 +21,33 @@ fn stamp(ms: i64, base: i64) -> Stamp {
         boot_ms: ms - base,
     }
 }
+const CATEGORIES: &str = r##"
+[[categories]]
+name = "Planning"
+[[categories.rules]]
+application = "Editor"
+
+[[categories]]
+name = "Research"
+color = "#4f8cff"
+[[categories.rules]]
+application = "Browser"
+
+[[categories]]
+name = "Communication"
+[[categories.rules]]
+application = "Chat"
+"##;
+
 fn main() -> anyhow::Result<()> {
+    let arguments: Vec<String> = std::env::args().skip(1).collect();
+    if arguments.first().map(String::as_str) == Some("--demo") {
+        return demo(arguments.get(1).map_or("127.0.0.1:47832", String::as_str));
+    }
     let dir = tempfile::tempdir()?;
+    let config = tempfile::tempdir()?;
+    let settings = config.path().join("config.toml");
+    std::fs::write(&settings, CATEGORIES)?;
     let base = 1790042400000; // 2026-09-22 04:00 Europe/Oslo
     let mut recorder = Recorder::open(dir.path(), stamp(base, base))?;
     recorder.apply(
@@ -107,7 +135,7 @@ fn main() -> anyhow::Result<()> {
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
     });
-    let web = Web::new(dir.path(), "127.0.0.1:47832")?;
+    let web = Web::configured(dir.path(), "127.0.0.1:47832", Some(settings))?;
     let server = timeline::web::start(web.clone(), stop.clone())?;
     println!("{}", web.launch_url()?);
     std::io::stdout().flush()?;
@@ -159,4 +187,159 @@ fn main() -> anyhow::Result<()> {
     stop.store(true, Ordering::Relaxed);
     server.join().unwrap()?;
     Ok(())
+}
+
+const DEMO_CATEGORIES: &str = r#"
+[[title_rules]]
+pattern = '^[\x{2800}-\x{28FF}✳]\s+'
+
+[[categories]]
+name = "Timeline"
+[[categories.rules]]
+application = "code"
+title = '(?i)timeline'
+[[categories.rules]]
+application = "kitty"
+title = 'timeline'
+[[categories.rules]]
+application = "firefox"
+title = 'localhost:47831|timeline'
+
+[[categories]]
+name = "Communication"
+[[categories.rules]]
+application = "Slack"
+[[categories.rules]]
+application = "thunderbird"
+[[categories.rules]]
+application = "zoom"
+
+[[categories]]
+name = "Writing"
+[[categories.rules]]
+application = "obsidian"
+[[categories.rules]]
+application = "code"
+title = 'notes'
+
+[[categories]]
+name = "Browsing"
+[[categories.rules]]
+application = "firefox"
+"#;
+
+/// Seven activity days ending today, 09:00–17:30 local, with lunch pauses and
+/// idle stretches. Deterministic, so screenshots of the UI are comparable.
+fn demo(address: &str) -> anyhow::Result<()> {
+    use chrono::{TimeZone, Utc};
+    const WINDOWS: &[(&str, &str)] = &[
+        ("code", "queries.rs - timeline - Visual Studio Code"),
+        ("code", "● overview.rs - timeline - Visual Studio Code"),
+        ("code", "README.md - notes - Visual Studio Code"),
+        ("kitty", "~/repos/timeline: cargo test"),
+        ("kitty", "⠋ Claude Code — timeline"),
+        ("kitty", "~: htop"),
+        ("firefox", "Timeline — localhost:47831 — Mozilla Firefox"),
+        (
+            "firefox",
+            "Pull request #42 · example/timeline — Mozilla Firefox",
+        ),
+        ("firefox", "std::collections - Rust — Mozilla Firefox"),
+        ("firefox", "Hacker News — Mozilla Firefox"),
+        ("Slack", "#general - Slack"),
+        ("Slack", "Direct message - Slack"),
+        ("thunderbird", "Inbox - Mozilla Thunderbird"),
+        ("zoom", "Zoom Meeting"),
+        ("obsidian", "Daily note - Obsidian"),
+    ];
+    let dir = tempfile::tempdir()?;
+    let config = tempfile::tempdir()?;
+    let settings = config.path().join("config.toml");
+    std::fs::write(&settings, DEMO_CATEGORIES)?;
+    let zone: chrono_tz::Tz = timeline::config::activity_timezone().parse()?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_millis() as i64;
+    let today = Utc
+        .timestamp_millis_opt(now)
+        .unwrap()
+        .with_timezone(&zone)
+        .date_naive();
+    let local = |date: chrono::NaiveDate, hour: u32, minute: u32| {
+        zone.from_local_datetime(&date.and_hms_opt(hour, minute, 0).unwrap())
+            .earliest()
+            .unwrap()
+            .timestamp_millis()
+    };
+    let first = today - chrono::Days::new(6);
+    let base = local(first, 0, 0);
+    let mut seed: u64 = 0x5eed;
+    let mut random = move |limit: u64| {
+        seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        (seed >> 33) % limit
+    };
+    for offset in 0..7 {
+        let date = first + chrono::Days::new(offset);
+        let (start, end) = (local(date, 9, 0), local(date, 17, 30).min(now));
+        if start >= end {
+            continue;
+        }
+        let (lunch, back) = (local(date, 12, 0), local(date, 12, 45));
+        let mut recorder = Recorder::open(dir.path(), stamp(start, base))?;
+        recorder.apply(
+            Input::Connected {
+                locked: false,
+                idle: false,
+            },
+            stamp(start, base),
+        )?;
+        recorder.apply(Input::Resume, stamp(start, base))?;
+        let mut at = start;
+        while at < end {
+            if (lunch..back).contains(&at) {
+                recorder.apply(Input::Pause, stamp(at, base))?;
+                while at + 4000 < back {
+                    at += 4000;
+                    recorder.apply(Input::Tick, stamp(at, base))?;
+                }
+                at = back;
+                recorder.apply(Input::Resume, stamp(at, base))?;
+            }
+            let (application, title) = WINDOWS[random(WINDOWS.len() as u64) as usize];
+            recorder.apply(
+                Input::Focus(Some(Window {
+                    address: format!("{application}-{}", random(3)),
+                    application: application.into(),
+                    title: title.into(),
+                })),
+                stamp(at, base),
+            )?;
+            let length = 60_000 * (1 + random(if application == "zoom" { 45 } else { 18 })) as i64;
+            let idle_from = (random(6) == 0).then(|| at + length / 2);
+            let until = (at + length).min(end);
+            while at + 4000 < until {
+                at += 4000;
+                if idle_from.is_some_and(|idle| (idle..idle + 4000).contains(&at)) {
+                    recorder.apply(Input::Idle(true), stamp(at, base))?;
+                } else {
+                    recorder.apply(Input::Tick, stamp(at, base))?;
+                }
+            }
+            if idle_from.is_some() {
+                recorder.apply(Input::Idle(false), stamp(until, base))?;
+            }
+            at = until;
+        }
+        recorder.apply(Input::Pause, stamp(end, base))?;
+    }
+    let stop = Arc::new(AtomicBool::new(false));
+    let web = Web::configured(dir.path(), address, Some(settings.clone()))?;
+    let server = timeline::web::start(web.clone(), stop)?;
+    println!("{}", web.launch_url()?);
+    println!("history {}", dir.path().display());
+    println!("settings {}", settings.display());
+    std::io::stdout().flush()?;
+    server.join().unwrap()
 }

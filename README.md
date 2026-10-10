@@ -352,9 +352,14 @@ appears in a URL. Sessions expire on process restart. Public HTML/CSS/JavaScript
 contain no recorded evidence; evidence endpoints require authentication.
 
 The timeline sits above screenshots and supports hover previews, committed
-scrubbing, expandable application lanes, focus and screenshot coverage, a date
-picker, zoom/panning, visual application/exact-title breakdowns, monitor layouts,
-and image enlargement. Breakdown totals follow the visible range. Date changes
+scrubbing, expandable application or category lanes, focus and screenshot
+coverage, a date picker, zoom/panning, visual category/application/exact-title
+breakdowns, monitor layouts, and image enlargement. Breakdown totals follow the
+visible range. With categories configured, "Color by" switches timeline fills,
+labels and lanes between applications and categories (remembered per browser),
+the breakdown adds a category composition bar and ranking, and a collapsed
+"Category rules" panel lists the active definitions. The page follows the system
+light or dark preference; colors come from theme tokens in `web/style.css`. Date changes
 preserve zoom and monitor layout. Superseded requests are aborted and their
 results discarded, including images still fetching or decoding. Server-side
 selection scans also cancel when a newer generation arrives from the same
@@ -515,6 +520,10 @@ node scripts/acceptance/viewer-resources.mjs --idle
 The script prints aggregate resource measurements without credentials, activity
 titles or screenshot contents. See the
 [viewer performance measurements](docs/acceptance/2026-09-22-viewer.md).
+
+To look at the UI with a week of varied synthetic focus and demo categories, run
+`cargo run --example web_fixture -- --demo 127.0.0.1:47850` and open the printed
+URL. It uses temporary history and settings, never the desktop or retained history.
 
 Browser tests verify that the bundled JavaScript matches Svelte/TypeScript and exercise
 the real HTTP/query/history stack in headless Chromium with two synthetic monitor

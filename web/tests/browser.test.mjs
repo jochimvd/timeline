@@ -175,9 +175,26 @@ test("bundled browser with real history, calendar, lanes, breakdown, monitors an
       "true",
     );
     assert.equal(await page.locator("#timeline").locator("..").locator("#breakdown").count(), 0);
-    await page.locator("#breakdown summary").click();
+    await page.locator("#breakdown summary", { hasText: "Window titles" }).click();
     assert.match(await page.locator("#titles").innerText(), /Editor/);
     assert.match(await page.locator("#applications").innerText(), /Editor/);
+    // Categories come from the fixture's settings file: all recorded focus is Planning.
+    assert.match(await page.locator("#categories li").first().innerText(), /Planning[\s\S]*100\.0%/);
+    assert.match(await page.locator("#categories").innerText(), /Research[\s\S]*Communication/);
+    assert.match(await page.locator("#totals").innerText(), /Categorized\s+100%/);
+    assert.match(await page.locator("#titles").innerText(), /Editor · Planning/);
+    await page.locator("#color-by label", { hasText: "Category" }).click();
+    assert.match(await page.locator("#lanes").innerText(), /Category lanes/);
+    assert.equal(await page.locator("#category-legend").innerText(), "Planning");
+    const categoryBlock = page.locator("#timeline .block").first();
+    assert.match(await categoryBlock.getAttribute("style"), /var\(--series-1\)/);
+    assert.match(await categoryBlock.innerText(), /Planning/);
+    assert.equal(await page.evaluate(() => localStorage.getItem("timeline.colorBy")), "category");
+    await page.locator("#color-by label", { hasText: "Application" }).click();
+    assert.match(await page.locator("#timeline .block").first().innerText(), /Editor/);
+    await page.locator(".breakdown-details", { hasText: "Category rules" }).locator("summary").click();
+    await page.waitForFunction(() => document.querySelectorAll("#category-rules > li").length === 3);
+    assert.match(await page.locator("#category-rules").innerText(), /Research[\s\S]*Browser/);
     await page.locator("#layout").selectOption("stack");
     await page.waitForFunction(
       () => document.querySelectorAll("#images canvas").length === 2,
@@ -501,6 +518,7 @@ test("bundled browser with real history, calendar, lanes, breakdown, monitors an
     await page.waitForFunction(() => [...document.querySelectorAll("#timeline .block")]
       .some(n => n.dataset.description?.includes("Browser")), null, { timeout: 7000 });
     assert.match(await page.locator("#applications").innerText(), /Browser/);
+    assert.doesNotMatch(await page.locator("#categories").innerText(), /Research\s+—/, "live updates refresh category totals");
     assert.match(await timeline.innerText(), /Screenshots · Display C/);
     assert.equal(await page.locator("#images canvas").count(), 0, "live refresh must not replace the selected preview");
     await timeline.dispatchEvent("click", { clientX: Math.ceil(liveBox.x + liveBox.width * 3650000 / 86400000), buttons: 1 });

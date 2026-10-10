@@ -1,7 +1,7 @@
 import { writable, readonly } from "svelte/store";
 import { request, query, pages } from "./api";
 import { createImageLoader, createImagePool, type ImageFrame } from "./images";
-import type { Range, Block, Coverage, Overview, Shot, Evidence, OverviewUpdates } from "./types";
+import type { Range, Block, CategoryRow, Coverage, Overview, Shot, Evidence, OverviewUpdates } from "./types";
 
 export const zoomLevels: { value: string; label: string; durationMs?: number }[] = [
   { value: "1", label: "Full day" }, { value: "2", label: "12 hours" },
@@ -14,10 +14,12 @@ export const zoomLevels: { value: string; label: string; durationMs?: number }[]
 ];
 
 export type View = {
-  date: string; timezone: string; zoom: string; layout: string; fitWidth?: number; navigationBusy: boolean;
+  date: string; timezone: string; settingsPath: string | null; zoom: string; layout: string; fitWidth?: number; navigationBusy: boolean;
   day?: Range; visible?: Range; loadedRange?: Range; selected: number;
   dayLoading: boolean; rangeLoading: boolean; evidenceLoading: boolean;
   blocks: Block[]; rows: Coverage[]; totals?: Overview["totals"];
+  /** Configured categories plus uncategorized focus, most time first. */
+  categories: CategoryRow[];
   focus: Coverage[]; shots: Shot[]; frames: ImageFrame[] | null;
   evidenceTime: number | null;
   hoverEvidence: { time: number | null; focus: Coverage[]; frames: ImageFrame[] | null; error: string; loading: boolean };
@@ -34,9 +36,9 @@ const activityFormatters = new Map<string, Intl.DateTimeFormat>();
 /** All asynchronous transitions publish complete view state; views never manage requests. */
 export function createTimelineApp() {
   let view: View = {
-    date: "", timezone: Intl.DateTimeFormat().resolvedOptions().timeZone, zoom: "1", layout: "grid",
+    date: "", timezone: Intl.DateTimeFormat().resolvedOptions().timeZone, settingsPath: null, zoom: "1", layout: "grid",
     navigationBusy: false, selected: 0, dayLoading: true, rangeLoading: false,
-    evidenceLoading: false, blocks: [], rows: [], focus: [], shots: [], frames: null,
+    evidenceLoading: false, blocks: [], rows: [], categories: [], focus: [], shots: [], frames: null,
     hoverEvidence: { time: null, focus: [], frames: null, error: "", loading: false },
     evidenceTime: null, evidenceError: "", message: "",
     recording: "Connecting…", paused: false, recordingBusy: true,
@@ -106,15 +108,18 @@ export function createTimelineApp() {
       if (row.focus?.kind !== "focus") { previousCoverage = undefined; continue; }
       const window = row.focus.window!;
       const group = { application: window.application, title: row.mixed ? "Mixed activity · zoom in for detail" : window.title };
+      const category = row.focus.category ?? null;
       const previous = blocks.at(-1);
       if (previous && previousCoverage?.segment === row.segment && previousCoverage?.recording_boundary === row.recording_boundary
-        && previous.range.end_ms === row.range.start_ms && previous.mixed === row.mixed
+        && previous.range.end_ms === row.range.start_ms && previous.mixed === row.mixed && previous.category === category
         && previous.group.application === group.application && previous.group.title === group.title) {
         previous.range.end_ms = row.range.end_ms;
-      } else blocks.push({ id: "display:" + row.range.start_ms + ":" + blocks.length, range: { ...row.range }, group, mixed: row.mixed, idle_ms: 0 });
+      } else blocks.push({ id: "display:" + row.range.start_ms + ":" + blocks.length, range: { ...row.range }, group, category, mixed: row.mixed, idle_ms: 0 });
       previousCoverage = row;
     }
-    patch({ ...transition, rows, blocks, totals, loadedRange: range, rangeLoading: false,
+    const categories = (rows.filter(row => row.kind === "category") as CategoryRow[])
+      .sort((a, b) => b.elapsed_ms - a.elapsed_ms || Number(a.category === null) - Number(b.category === null));
+    patch({ ...transition, rows, blocks, categories, totals, loadedRange: range, rangeLoading: false,
       message: blocks.length ? "" : "No recorded focus in this range. Coverage and screenshots may differ." });
   }
   async function readRange(range: Range, signal: AbortSignal) {
@@ -454,9 +459,9 @@ export function createTimelineApp() {
     history.replaceState(null, "", "/");
     try {
       if (token) await request("/bootstrap", { token }, lifetime.signal);
-      const config = await request<{ timezone: string }>("/api/config", undefined, lifetime.signal);
+      const config = await request<{ timezone: string; settings: string | null }>("/api/config", undefined, lifetime.signal);
       if (disposed) return;
-      patch({ timezone: config.timezone });
+      patch({ timezone: config.timezone, settingsPath: config.settings });
       // Find the newest available capture across activity days, including when
       // recording is paused. Explicit navigation during startup takes priority.
       if (!view.date) {

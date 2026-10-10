@@ -223,7 +223,12 @@ impl Web {
             .route("/api/status", get(status))
             .route(
                 "/api/config",
-                get(|| async { Json(json!({"timezone": crate::config::activity_timezone()})) }),
+                get(|State(state): State<Arc<Web>>| async move {
+                    Json(json!({
+                        "timezone": crate::config::activity_timezone(),
+                        "settings": state.settings,
+                    }))
+                }),
             )
             .route("/api/recording/{command}", post(recording))
             .route(
