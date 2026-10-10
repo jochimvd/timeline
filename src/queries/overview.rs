@@ -10,6 +10,7 @@ const OVERVIEW_CACHE_BYTES: usize = 16 * 1024 * 1024;
 pub(super) struct CachedOverview {
     key: String,
     pub totals: Totals,
+    pub metrics: FocusMetrics,
     pub rows: Vec<Box<[u8]>>,
     bytes: usize,
 }
@@ -74,43 +75,30 @@ struct Summary {
 }
 impl Summary {
     fn add(&mut self, coverage: &Coverage) -> Result<()> {
+        self.totals.add(coverage);
         let elapsed = coverage.elapsed_ms.unwrap_or(0);
-        match &coverage.focus {
-            FocusCoverage::Focus {
-                window,
-                idle,
-                category,
-            } => {
-                self.totals.focus_ms += elapsed;
-                if *idle {
-                    self.totals.idle_ms += elapsed;
-                }
-                // Look up by reference; only a new key allocates.
-                let titles = match self.titles.get_mut(&window.application) {
-                    Some(titles) => titles,
-                    None => self.titles.entry(window.application.clone()).or_default(),
-                };
-                match titles.get_mut(&window.title) {
-                    Some((total, _)) => *total += elapsed,
-                    None => {
-                        self.bytes += window.application.len() * 2
-                            + window.title.len()
-                            + category.as_ref().map_or(0, String::len)
-                            + 128;
-                        if self.bytes > BREAKDOWN_BYTES {
-                            bail!(QueryError::LimitExceeded);
-                        }
-                        titles.insert(window.title.clone(), (elapsed, category.clone()));
+        if let FocusCoverage::Focus {
+            window, category, ..
+        } = &coverage.focus
+        {
+            // Look up by reference; only a new key allocates.
+            let titles = match self.titles.get_mut(&window.application) {
+                Some(titles) => titles,
+                None => self.titles.entry(window.application.clone()).or_default(),
+            };
+            match titles.get_mut(&window.title) {
+                Some((total, _)) => *total += elapsed,
+                None => {
+                    self.bytes += window.application.len() * 2
+                        + window.title.len()
+                        + category.as_ref().map_or(0, String::len)
+                        + 128;
+                    if self.bytes > BREAKDOWN_BYTES {
+                        bail!(QueryError::LimitExceeded);
                     }
+                    titles.insert(window.title.clone(), (elapsed, category.clone()));
                 }
             }
-            FocusCoverage::NoFocus { idle } => {
-                self.totals.no_focus_ms += elapsed;
-                if *idle {
-                    self.totals.idle_ms += elapsed;
-                }
-            }
-            _ => (),
         }
         Ok(())
     }
@@ -265,11 +253,12 @@ impl Queries {
                 revision,
                 resolved,
                 totals: cached.totals.clone(),
+                metrics: cached.metrics.clone(),
                 breakdown: output.finish()?,
             });
         }
         let mut cache = OverviewBuilder::new();
-        let totals = self.overview_rows(&cursor, resolved.range, display, |item| {
+        let (totals, metrics) = self.overview_rows(&cursor, resolved.range, display, |item| {
             cache.push(&item)?;
             output.push(item)
         })?;
@@ -277,6 +266,7 @@ impl Queries {
             remember_overview(CachedOverview {
                 key,
                 totals: totals.clone(),
+                metrics: metrics.clone(),
                 rows,
                 bytes: cache.bytes,
             });
@@ -285,10 +275,11 @@ impl Queries {
             revision,
             resolved,
             totals,
+            metrics,
             breakdown: output.finish()?,
         })
     }
-    /// One observation pass for totals, focus rows and image context, then one
+    /// One observation pass for totals, metrics, focus rows and image context, then one
     /// screenshot pass; a second observation pass only if held rows overflow.
     fn overview_rows(
         &self,
@@ -296,20 +287,22 @@ impl Queries {
         range: Range,
         mut display: Option<display::Display>,
         mut emit: impl FnMut(Breakdown) -> Result<()>,
-    ) -> Result<Totals> {
+    ) -> Result<(Totals, FocusMetrics)> {
         let plan = self.plan(cursor, range, Scope::Evidence)?;
         let mut summary = Summary::default();
+        let mut metrics = self.metrics(range);
         let mut held = Held::Rows(Vec::new(), 0);
         let mut context = ImageContext::default();
         self.coverage(cursor, range, &plan, Some(&mut context), |coverage| {
             summary.add(&coverage)?;
+            metrics.add(&coverage);
             match &mut display {
                 Some(display) => display.focus(coverage)?,
                 None => held.push(coverage),
             }
             Ok(())
         })?;
-        let totals = summary.totals.clone();
+        let totals = (summary.totals.clone(), metrics.finish());
         for row in summary.rows(&self.settings.categories) {
             emit(row)?;
         }

@@ -348,7 +348,7 @@ fn unknown(range: Range) -> Coverage {
         focus: FocusCoverage::Unknown,
     }
 }
-fn proportional(elapsed: i64, full: Range, clipped: Range) -> i64 {
+pub(super) fn proportional(elapsed: i64, full: Range, clipped: Range) -> i64 {
     // Difference of cumulative elapsed fractions makes adjacent clips additive.
     let offset = |time: i64| {
         (i128::from(time) - i128::from(full.start_ms)) * i128::from(elapsed)

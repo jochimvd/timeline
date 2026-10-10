@@ -100,8 +100,11 @@ own client class rather than accepting it from a request. The service offers:
 
 - `overview`: activity date or an explicit half-open range, at most 31 days;
   category/application/exact-title totals, idle/no-focus totals, and paginated
-  independent focus/image coverage. Totals include recorded idle focus and do not
-  imply task time.
+  independent focus/image coverage, and [focus metrics](#focus-metrics) for the
+  range. Totals include recorded idle focus and do not imply task time.
+- `focus_metrics`: [focus metrics](#focus-metrics) and focus totals per activity
+  day of a date or a range of at most 31 days, from one coverage scan without
+  image coverage. Each day matches the overview metrics of that day.
 - `categories`: the configured [categories](#categories) and their rules, plus
   the reason the settings file was ignored, if it was invalid.
 - `overview_display`: optional display-point budget (1–2048) for lossy timeline
@@ -235,6 +238,49 @@ coverage interval, activity block and exact-title total carries its `category`
 with one row per configured category in file order, then uncategorized focus.
 Editing categories leaves block IDs unchanged but restarts analysis listings.
 A category describes observed focus, not task attribution.
+
+### Focus metrics
+
+Like the focus statistics of other time trackers, focus metrics summarize how
+observed focus moved, computed at query time from the same focus coverage as
+totals; nothing extra is recorded. They describe observed focus, not task time,
+and make no judgement of the work.
+
+Both metrics work within *active runs*: adjacent focus coverage intervals in one
+timing segment and recording session, each either non-idle focus or a confirmed
+absence of focus. Idle periods, recording gaps (pause, lock, restart, suspend),
+unknown time and timing boundaries end a run. Durations are monotonic elapsed time
+within a segment; uncertain intervals contribute none.
+
+- **Active focus** (`active_ms`) is focus time outside idle periods.
+- A **context switch** is a change between consecutive focused windows of a run:
+  `application_switches` count application changes and, with categories
+  configured, `category_switches` count category changes, with uncategorized focus
+  as one more value (otherwise `null`). Passing through no focused window between
+  two applications still switches; a transition across idle, a gap or a boundary
+  does not. Rates are switches per hour of active focus, to one decimal.
+- A **focus stretch** is a continuous run of active focus on one *subject*: the
+  category of categorized focus, otherwise the application. It ends at the end of
+  its run or when focus moves to another subject, except for a *brief
+  interruption*: focus elsewhere, or no focus, lasting less than
+  `BRIEF_INTERRUPTION_MS` (60 s) before focus returns to the subject, provided all
+  bridged interruptions take at most `MAX_INTERRUPTED_PERCENT` (10%) of the
+  stretch. A 30-second glance at chat therefore needs 4.5 minutes on the subject
+  first, and rapid alternation remains short stretches with many switches. Bridged
+  interruptions still count as switches. A stretch's `elapsed_ms` is its active
+  focus, including focus during bridged interruptions, so stretches partition
+  active focus. Its `range` runs from its first to its last focus on the subject.
+- `longest_stretch` is the earliest longest stretch, with its range, subject and
+  bridged `interruptions`. `stretches` divides all stretches into `long` (at least
+  25 minutes), `medium` (10–25) and `short` (under 10), each with a count and
+  elapsed time, as a picture of fragmentation.
+- `hours` lists local clock hours with active focus or switches: active focus and
+  the switches that began in that hour, clipped to the range.
+
+Metrics are clipped to the requested range like totals: a stretch crossing its
+edge is cut there, and a transition exactly at its start has no observed
+predecessor. Per-day metrics therefore add up to a multi-day range except for
+stretches and switches across 04:00.
 
 ## Screenshot capture
 

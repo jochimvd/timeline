@@ -27,6 +27,7 @@ use std::{
 mod coverage;
 mod display;
 mod images;
+mod metrics;
 mod navigation;
 mod overview;
 mod paging;
@@ -36,6 +37,11 @@ mod updates;
 use coverage::is_boundary;
 pub use display::{DisplayFocus, DisplayImage};
 use images::ImageContext;
+pub use metrics::{
+    BRIEF_INTERRUPTION_MS, DayFocusMetrics, FocusMetrics, FocusMetricsByDay, FocusStretch,
+    FocusSubject, HourlyFocus, LONG_STRETCH_MS, MAX_INTERRUPTED_PERCENT, MEDIUM_STRETCH_MS,
+    StretchBucket, StretchDistribution,
+};
 pub use navigation::ActivityBounds;
 use overview::cached_overview;
 use paging::{Cursor, Pager, decode_cursor, encode_cursor};
@@ -239,11 +245,33 @@ pub struct Totals {
     pub no_focus_ms: i64,
     pub idle_ms: i64,
 }
+impl Totals {
+    /// Adds the elapsed time of one coverage interval; uncertain time has none.
+    fn add(&mut self, coverage: &Coverage) {
+        let elapsed = coverage.elapsed_ms.unwrap_or(0);
+        let idle = match coverage.focus {
+            FocusCoverage::Focus { idle, .. } => {
+                self.focus_ms += elapsed;
+                idle
+            }
+            FocusCoverage::NoFocus { idle } => {
+                self.no_focus_ms += elapsed;
+                idle
+            }
+            _ => false,
+        };
+        if idle {
+            self.idle_ms += elapsed;
+        }
+    }
+}
 #[derive(Debug, Serialize)]
 pub struct Overview {
     pub revision: String,
     pub resolved: ResolvedRange,
     pub totals: Totals,
+    /// Context switches and focus stretches within the range.
+    pub metrics: FocusMetrics,
     pub breakdown: Page<Breakdown>,
 }
 #[derive(Debug, Serialize)]
