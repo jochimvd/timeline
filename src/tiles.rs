@@ -418,10 +418,11 @@ impl History {
         lease: File,
         format: ImageFormat,
     ) -> Result<Option<ImageRead>> {
-        let row=self.connection.query_row("SELECT images.width,images.height,images.tile_size,CASE WHEN length(images.map)<=5760 THEN images.map ELSE NULL END FROM screenshots JOIN images ON images.name=screenshots.image WHERE screenshots.id=?1",[id],|r|Ok((r.get::<_,u32>(0)?,r.get::<_,u32>(1)?,r.get::<_,u32>(2)?,r.get::<_,Vec<u8>>(3)?))).optional()?;
+        let row=self.connection.query_row("SELECT images.width,images.height,images.tile_size,CASE WHEN length(images.map)<=5760 THEN images.map ELSE NULL END FROM screenshots JOIN images ON images.name=screenshots.image WHERE screenshots.id=?1",[id],|r|Ok((r.get::<_,u32>(0)?,r.get::<_,u32>(1)?,r.get::<_,u32>(2)?,r.get::<_,Option<Vec<u8>>>(3)?))).optional()?;
         let Some((width, height, tile_size, map)) = row else {
             return Ok(None);
         };
+        let map = map.context("invalid tile map: exceeds size limit")?;
         let pixels = codec::pixel_bytes(width, height)?;
         ensure!(tile_size > 0 && tile_size <= 16383, "invalid tile grid");
         let ids = map_ids(&map)?;
