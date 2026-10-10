@@ -38,7 +38,7 @@
       <div><dt>Database + journal</dt><dd>{bytes(data?.database_bytes)}</dd></div>
       <div><dt>Tile maps <small>included in database</small></dt><dd>{bytes(data?.map_bytes)}</dd></div>
       <div><dt>Tile reuse <small>bytes saved across tiled images</small></dt><dd>{data?.tile_reuse_percent == null ? "—" : `${data.tile_reuse_percent.toFixed(1)}%`}</dd></div>
-      <div><dt>Preview cache <small>RAM only · 16 MiB limit</small></dt><dd>{bytes(data?.thumbnail_cache_bytes)}</dd></div>
+      <div><dt>Preview cache <small>RAM only{data ? ` · ${bytes(data.thumbnail_cache_limit)} limit` : ""}</small></dt><dd>{bytes(data?.thumbnail_cache_bytes)}</dd></div>
     </dl>
     <div class="storage-caption">
       <span>{data ? `${data.captures.toLocaleString()} captures · ${data.regions.toLocaleString()} regions · ${data.retention_days}-day retention` : "\u00a0"}</span>
