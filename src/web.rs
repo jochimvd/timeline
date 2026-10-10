@@ -211,7 +211,7 @@ impl Web {
             .route("/api/status", get(status))
             .route(
                 "/api/config",
-                get(|| async { Json(json!({"timezone":crate::config::ACTIVITY_TIMEZONE})) }),
+                get(|| async { Json(json!({"timezone": crate::config::activity_timezone()})) }),
             )
             .route("/api/recording/{command}", post(recording))
             .route(
@@ -574,8 +574,13 @@ fn tool_definitions() -> Value {
     let range = json!({"type":"object","properties":{"start_ms":{"type":"integer"},"end_ms":{"type":"integer"}},"required":["start_ms","end_ms"],"additionalProperties":false});
     let page =
         json!({"cursor":{"type":"string"},"limit":{"type":"integer","minimum":1,"maximum":500}});
+    let overview = format!(
+        "Overview of an activity date (04:00 {}) or half-open range, at most 31 days. \
+        Page all breakdown rows. Focus includes idle; gaps are unknown, not task time.",
+        crate::config::activity_timezone()
+    );
     let tools: Vec<Value> = [
-        ("overview", "Overview of an activity date (04:00 Europe/Oslo) or half-open range, at most 31 days. Page all breakdown rows. Focus includes idle; gaps are unknown, not task time.", vec![]),
+        ("overview", overview.as_str(), vec![]),
         ("blocks", "Activity blocks in a half-open range up to 48 hours. Stable block and observation references; grouping is not task attribution.", vec!["range"]),
         ("observations", "Original window observations in a range up to 48 hours. Page before inferring tasks.", vec!["range"]),
         ("observation", "Retrieve one original observation by its stable ID; expired evidence is unavailable.", vec!["id"]),

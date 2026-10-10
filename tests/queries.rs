@@ -189,7 +189,7 @@ fn grouping_is_replaceable_but_exact_totals_idle_and_originals_are_not() {
 fn activity_days_follow_oslo_dst_and_half_open_elapsed_clips_are_additive() {
     let dir = tempfile::tempdir().unwrap();
     let mut h = History::open(dir.path()).unwrap();
-    let q = Queries::open(dir.path()).unwrap();
+    let q = Queries::with_policy(dir.path(), "Europe/Oslo", Box::new(ExactTitle)).unwrap();
     for (date, hours) in [("2026-03-28", 23), ("2026-10-24", 25)] {
         let resolved = q
             .resolve(Selection::ActivityDate(

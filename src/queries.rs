@@ -364,7 +364,7 @@ impl Queries {
     pub fn open(directory: &Path) -> Result<Self> {
         Self::with_policy(
             directory,
-            crate::config::ACTIVITY_TIMEZONE,
+            crate::config::activity_timezone(),
             Box::new(ExactTitle),
         )
     }
