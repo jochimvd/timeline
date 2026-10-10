@@ -240,17 +240,44 @@ application = "Slack"
 A rule matches when all of its given fields match; it needs at least one. The
 first category in file order with a matching rule wins, and focus matching none
 is uncategorized. Title patterns are case-sensitive unless they start with `(?i)`.
-Categories without a `color` take the next of eight palette colors in file order
-(chosen per light/dark theme by the browser); later ones are shown in the
-neutral uncategorized color. Names must be unique and colors look like `#rrggbb`.
+Names must be unique and colors look like `#rrggbb`.
+
+A category can name a `parent`, nesting it as a subcategory, up to four levels:
+
+```toml
+[[categories]]
+name = "Work"
+
+[[categories]]
+name = "Project X"
+parent = "Work"
+[[categories.rules]]
+title = '(?i)project-x'
+```
+
+Parents can be declared anywhere in the file and need no rules of their own; a
+parent's rules catch whatever its subcategories don't. Rules still match in file
+order whatever their level, so order specific rules first. The hierarchy decides
+how time rolls up: focus belongs to the most specific matching category and
+counts toward each of its ancestors.
+
+Top-level categories without a `color` take the next of eight palette colors in
+file order (chosen per light/dark theme by the browser); later ones are shown in
+the neutral uncategorized color. Subcategories carry their parent's color unless
+they set their own.
 
 Categories are computed at query time like title rules: nothing is stored, so
 edits re-categorize all retained history in the browser and over MCP. Every focus
-coverage interval, activity block and exact-title total carries its `category`
-(`null` when uncategorized); blocks never span two categories. Overviews start
-with one row per configured category in file order, then uncategorized focus.
-Editing categories leaves block IDs unchanged but restarts analysis listings.
-A category describes observed focus, not task attribution.
+coverage interval, activity block and exact-title total carries its most specific
+`category` (`null` when uncategorized); blocks never span two categories.
+Overviews start with one row per configured category in tree order (each
+followed by its subcategories), with its `parent`, `depth`, `elapsed_ms`
+including subcategories and `own_ms` from its own rules, then uncategorized
+focus. Per-day focus metrics list each category's own time. Category switches and
+focus stretches use the most specific category. The browser can show categories
+at the top level or in full detail. Editing categories leaves block IDs unchanged
+but restarts analysis listings. A category describes observed focus, not task
+attribution.
 
 ### Focus metrics
 

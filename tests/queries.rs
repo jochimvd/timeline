@@ -324,6 +324,7 @@ fn categories_classify_cleaned_focus_without_changing_blocks_or_originals() {
                 palette,
                 elapsed_ms,
                 percent_of_focus,
+                ..
             } => Some((
                 category.as_deref(),
                 color.as_deref(),
@@ -423,6 +424,102 @@ fn categories_classify_cleaned_focus_without_changing_blocks_or_originals() {
         Some("- Timeline$")
     );
     assert!(list.problem.is_none());
+}
+
+#[test]
+fn subcategory_focus_rolls_up_to_every_ancestor() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = History::open(dir.path()).unwrap();
+    for (index, (application, title)) in [
+        ("editor", "project-x"),
+        ("chat", "Team"),
+        ("browser", "Jira"),
+        ("browser", "News"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let wall = index as i64 * 10;
+        put(
+            &mut h,
+            wall,
+            wall,
+            1,
+            StateChange::Focus,
+            window(application, title, false),
+        );
+    }
+    put(&mut h, 40, 40, 1, StateChange::Focus, state(None, false));
+    let settings = Settings::parse(
+        r##"
+        [[categories]]
+        name = "Project X"
+        parent = "Acme"
+        [[categories.rules]]
+        title = 'project-x'
+
+        [[categories]]
+        name = "Work"
+        color = "#4f8cff"
+        [[categories.rules]]
+        title = 'Jira'
+
+        [[categories]]
+        name = "Acme"
+        parent = "Work"
+        [[categories.rules]]
+        application = "chat"
+        "##,
+    )
+    .unwrap();
+    let q = Queries::open(dir.path())
+        .unwrap()
+        .with_settings(settings.into());
+    let overview = q
+        .overview(Mcp, Selection::Range(range(0, 50)), page(500, None))
+        .unwrap();
+    let rows: Vec<_> = overview
+        .breakdown
+        .items
+        .iter()
+        .filter_map(|row| match row {
+            Breakdown::Category {
+                category,
+                parent,
+                depth,
+                color,
+                elapsed_ms,
+                own_ms,
+                ..
+            } => Some((
+                category.as_deref(),
+                parent.as_deref(),
+                *depth,
+                color.as_deref(),
+                *elapsed_ms,
+                *own_ms,
+            )),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        rows,
+        [
+            (Some("Work"), None, 0, Some("#4f8cff"), 30, 10),
+            (Some("Acme"), Some("Work"), 1, Some("#4f8cff"), 20, 10),
+            (Some("Project X"), Some("Acme"), 2, Some("#4f8cff"), 10, 10),
+            (None, None, 0, None, 10, 10),
+        ]
+    );
+    let blocks = q.blocks(Mcp, range(0, 40), page(100, None)).unwrap().items;
+    assert_eq!(
+        blocks
+            .iter()
+            .map(|b| b.category.as_deref())
+            .collect::<Vec<_>>(),
+        [Some("Project X"), Some("Acme"), Some("Work"), None],
+        "blocks carry the most specific category"
+    );
 }
 
 #[test]

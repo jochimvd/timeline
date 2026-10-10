@@ -222,14 +222,21 @@ pub struct ImageCoverage {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Breakdown {
-    /// Every configured category in configuration order, then uncategorized
-    /// focus (`category: null`) when there is any.
+    /// Every configured category in tree order (each followed by its
+    /// subcategories), then uncategorized focus (`category: null`) if any.
     Category {
         category: Option<String>,
-        /// Explicit `#rrggbb` color, else a 1-based categorical palette slot.
+        /// Enclosing category of a subcategory.
+        parent: Option<String>,
+        /// Nesting level: 0 for top-level categories.
+        depth: usize,
+        /// `#rrggbb` color, else a 1-based categorical palette slot.
         color: Option<String>,
         palette: Option<u8>,
+        /// Focus in this category, including its subcategories.
         elapsed_ms: i64,
+        /// Focus matched by this category's own rules.
+        own_ms: i64,
         percent_of_focus: f64,
     },
     Application {

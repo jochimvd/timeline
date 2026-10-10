@@ -472,8 +472,9 @@ pub struct DayFocusMetrics {
     pub date: String,
     pub range: Range,
     pub totals: Totals,
-    /// Focus by category: configured categories in order, then uncategorized,
-    /// each only with focus. Empty without configured categories.
+    /// Focus matched by each category's own rules, in tree order, then
+    /// uncategorized, each only with focus; subcategories roll up through
+    /// their `parent`. Empty without configured categories.
     pub categories: Vec<CategoryFocus>,
     /// Focus by application, most first.
     pub applications: Vec<ApplicationFocus>,

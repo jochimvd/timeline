@@ -620,14 +620,15 @@ fn tool_definitions() -> Value {
     let overview = format!(
         "Overview of an activity date (04:00 {zone}), consecutive dates or half-open range, at \
         most 31 days. Page all breakdown rows: category totals (every configured category in \
-        order, then uncategorized as category null), application and exact-title totals \
+        tree order with parent and depth, then uncategorized as category null; elapsed_ms \
+        includes subcategories, own_ms is the category's own matches), application and exact-title totals \
         (titles carry their category), then focus and screenshot coverage. Focus includes idle; \
         gaps are unknown, not task time. `metrics` summarizes the range as in focus_metrics."
     );
     let metrics = format!(
         "Per activity day (04:00 {zone}) of a date, consecutive dates (e.g. a week) or half-open \
-        range, at most 31 days: focus totals, focus by category and by application (focus_ms \
-        includes idle, active_ms excludes it), evidence, and focus metrics. evidence splits the \
+        range, at most 31 days: focus totals, focus by category (its own matches, not \
+        subcategories; roll up via parent) and by application (focus_ms includes idle, active_ms excludes it), evidence, and focus metrics. evidence splits the \
         day into observed time, recording gaps (with reasons) and unknown time up to now; a day \
         without observed evidence is missing evidence, not zero activity. active_ms is non-idle \
         focus. Context switches count application (and, with categories, category) changes \
@@ -660,7 +661,7 @@ fn tool_definitions() -> Value {
         ("focus_metrics", metrics.as_str(), vec![]),
         ("commits", commits.as_str(), vec![]),
         ("repositories", "The configured git paths and extra author emails, and the repositories found under them: name (relative to its configured path), path, and repositories or paths that could not be read. Repository names help relate commits and windows to projects.", vec![]),
-        ("categories", "The user's category definitions: ordered rules matching an exact application and/or a regex over the cleaned window title; the first matching category applies. Categories classify observed focus; they are hints, not task attribution.", vec![]),
+        ("categories", "The user's category definitions: ordered rules matching an exact application and/or a regex over the cleaned window title; the first matching rule in configuration order applies, at any level. A category may have a parent, making it a subcategory; its time rolls up to every ancestor. Categories classify observed focus; they are hints, not task attribution.", vec![]),
         ("blocks", "Activity blocks in a half-open range up to 48 hours, each with its category (null when uncategorized). Stable block and observation references; grouping is not task attribution.", vec!["range"]),
         ("observations", "Original window observations in a range up to 48 hours. Page before inferring tasks.", vec!["range"]),
         ("observation", "Retrieve one original observation by its stable ID; expired evidence is unavailable.", vec!["id"]),

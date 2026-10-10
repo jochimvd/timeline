@@ -102,7 +102,7 @@ impl Summary {
         }
         Ok(())
     }
-    /// Category rows in configuration order, then application and exact-title
+    /// Category rows in tree order, then application and exact-title
     /// rows, each in name order.
     fn rows(self, categories: &Categories) -> impl Iterator<Item = Breakdown> {
         let focus_ms = self.totals.focus_ms;
@@ -118,29 +118,45 @@ impl Summary {
             *by_category.entry(category.as_deref()).or_default() += elapsed;
         }
         let uncategorized = by_category.get(&None).copied().unwrap_or(0);
-        let mut rows: Vec<_> = categories
-            .list()
+        let list = categories.list();
+        let own: Vec<i64> = list
             .iter()
             .map(|category| {
-                let elapsed_ms = by_category
+                by_category
                     .get(&Some(category.name.as_str()))
                     .copied()
-                    .unwrap_or(0);
-                Breakdown::Category {
-                    category: Some(category.name.clone()),
-                    color: category.color.clone(),
-                    palette: category.palette,
-                    elapsed_ms,
-                    percent_of_focus: percent(elapsed_ms),
-                }
+                    .unwrap_or(0)
+            })
+            .collect();
+        let mut subtree = vec![0; list.len()];
+        for (category, &own_ms) in list.iter().zip(&own) {
+            for position in categories.lineage(&category.name) {
+                subtree[position] += own_ms;
+            }
+        }
+        let mut rows: Vec<_> = list
+            .iter()
+            .zip(own.into_iter().zip(subtree))
+            .map(|(category, (own_ms, elapsed_ms))| Breakdown::Category {
+                category: Some(category.name.clone()),
+                parent: category.parent.clone(),
+                depth: category.depth,
+                color: category.color.clone(),
+                palette: category.palette,
+                elapsed_ms,
+                own_ms,
+                percent_of_focus: percent(elapsed_ms),
             })
             .collect();
         if uncategorized > 0 {
             rows.push(Breakdown::Category {
                 category: None,
+                parent: None,
+                depth: 0,
                 color: None,
                 palette: None,
                 elapsed_ms: uncategorized,
+                own_ms: uncategorized,
                 percent_of_focus: percent(uncategorized),
             });
         }
