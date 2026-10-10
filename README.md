@@ -112,6 +112,7 @@ own client class rather than accepting it from a request. The service offers:
   flags. Repeated wall times return distinct timing segments.
 - `image`: retrieve the exact screenshot ID and its metadata with a bounded byte
   stream; missing/expired references or files return `QueryError::Unavailable`.
+  `preview` returns a lossy rendition of at most 64–4096 pixels per edge instead.
 
 Activity dates start at 04:00 in the source-configured `Europe/Oslo` timezone.
 Resolved bounds account for DST. Exceptional ambiguous/nonexistent 04:00 boundaries
@@ -147,9 +148,16 @@ never carry across recording/monitor boundaries or replace unavailable evidence.
 Known focus is not extended beyond its last durable checkpoint. A screenshot can
 be stale within valid coverage, with its original timestamp preserved.
 
-Queries keep a byte-bounded immutable observation snapshot (24 MiB), extending it
-at append watermarks and rebuilding after retention. Oversized histories fall back
-to streaming with reuse of the last small parsed checkpoint state. Overview
+Scans read only the timing segments that can intersect a range, plus the
+transitions between them and the latest evidence for a downtime tail. Wall time is
+near-monotonic within a segment, because clock jumps, suspend, stalls and monotonic
+resets start a new one. Per-segment id and wall bounds are kept per process, keyed
+by database identity and retention epoch and extended at append watermarks. A
+recorder creates the segment indexes that make the bounds a few seeks per segment;
+older histories are scanned once per process instead. Whole segments are scanned,
+so block IDs and image endpoints are unchanged. Parsed whole segments share a
+24 MiB cache that extends the open segment at append watermarks and is rebuilt after
+retention. Larger segments stream with reuse of the last small parsed checkpoint state. Overview
 pagination caches serialized rows (8 MiB per result, 16 MiB globally), keyed by
 database identity, range, watermarks and retention epoch. Active admitted reads can
 retain evicted entries until they finish. These caches preserve original IDs and
@@ -337,11 +345,13 @@ most 128 encoded previews / 16 MiB in RAM, with no thumbnail files or database
 records. Each read validates that the screenshot is still retained before using
 the cache and shares existing read admission and reclamation leases. Cold previews
 require tile decoding and resizing; cache hits avoid that work. Full-size viewing,
-CLI, MCP,
-and `/api/image/{id}` exports reconstruct a lossless WebP; a single-region image
+CLI and `/api/image/{id}` exports reconstruct a lossless WebP; a single-region image
 is returned byte-for-byte. Export reconstruction adds on-demand CPU and is
-separate from the browser path. MCP image content is limited to 24 MiB before base64 encoding and
-returns `limit_exceeded` for larger files. Browser metadata is limited to 20,000
+separate from the browser path. MCP `image` returns a quality-80 WebP downscaled to
+at most `max_edge` pixels per edge (default 1920, 64–4096, never upscaled); a
+single-region image within that bound is returned byte-for-byte. Its text content
+keeps the original metadata and capture timestamp. MCP image content is limited to
+24 MiB before base64 encoding and returns `limit_exceeded` for larger files. Browser metadata is limited to 20,000
 rows / 16 MiB per visible range; it asks the user to zoom in on overflow. Current
 monitor images are limited to 96 MiB of declared pixels and 32 MiB of encoded
 bytes per displayed set. Shared decoded tiles and canvas backing stores each

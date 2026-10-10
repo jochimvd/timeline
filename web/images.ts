@@ -181,8 +181,13 @@ export function createImageLoader(pool = createImagePool(), thumbnail = false) {
           const tile = asset.tiles[index].bitmap;
           const x = position % columns * h.tile_size, y = Math.floor(position / columns) * h.tile_size;
           if (width === h.width) context.drawImage(tile, x, y);
-          else context.drawImage(tile, x * width / h.width, y * height / h.height,
-            tile.width * width / h.width, tile.height * height / h.height);
+          else {
+            // Neighbouring tiles share rounded edges, so scaled tiles leave no seams.
+            const left = Math.round(x * width / h.width), top = Math.round(y * height / h.height);
+            context.drawImage(tile, left, top,
+              Math.round((x + tile.width) * width / h.width) - left,
+              Math.round((y + tile.height) * height / h.height) - top);
+          }
         });
       } catch (error) { dispose(); throw error; }
       return dispose;

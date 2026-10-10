@@ -578,6 +578,67 @@ async fn browser_pause_acknowledges_a_durable_recorder_transition() {
 }
 
 #[tokio::test]
+async fn mcp_images_are_bounded_renditions_with_original_metadata() {
+    use base64::Engine;
+    let dir = tempfile::tempdir().unwrap();
+    fixture(dir.path());
+    let mut h = History::open(dir.path()).unwrap();
+    let (width, height) = (2560, 1280);
+    let raw = [10, 20, 200, 255].repeat(width * height);
+    let prepared = History::prepare_pixels(dir.path(), width as u32, height as u32, &raw).unwrap();
+    let id = h
+        .commit_screenshot(
+            &ScreenshotSample {
+                unix_ms: 2000,
+                monotonic_ms: 2000,
+                segment: 1,
+                monitor: "A".into(),
+                width: width as u32,
+                height: height as u32,
+                transform: 0,
+            },
+            "native",
+            &prepared,
+        )
+        .unwrap();
+    drop(prepared);
+    let web = Web::new(dir.path(), HOST).unwrap();
+    let app = web.router();
+    let bearer = format!("Bearer {}", secret(dir.path()).unwrap());
+    let rendition = |result: Value| {
+        let metadata: Value =
+            serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(
+            (metadata["unix_ms"].clone(), metadata["width"].clone()),
+            (json!(2000), json!(2560))
+        );
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(result["content"][1]["data"].as_str().unwrap())
+            .unwrap();
+        timeline::codec::dimensions(&bytes).unwrap()
+    };
+    let image = tool(&app, &bearer, "image", json!({"id":id})).await;
+    assert_eq!(rendition(image), (1920, 960));
+    let image = tool(&app, &bearer, "image", json!({"id":id,"max_edge":300})).await;
+    assert_eq!(rendition(image), (300, 150));
+    let invalid = tool(&app, &bearer, "image", json!({"id":id,"max_edge":8})).await;
+    assert_eq!(invalid["isError"], true);
+    // The browser and CLI keep native resolution.
+    let cookie = session(&app, &web).await;
+    let original = call(
+        &app,
+        &format!("/api/image/{id}"),
+        None,
+        &[("cookie", &cookie)],
+    )
+    .await;
+    assert_eq!(
+        timeline::codec::dimensions(&original.2).unwrap(),
+        (2560, 1280)
+    );
+}
+
+#[tokio::test]
 async fn storage_and_previews_are_authenticated_bounded_and_read_only() {
     let dir = tempfile::tempdir().unwrap();
     fixture(dir.path());

@@ -81,6 +81,19 @@ impl PixelBudget {
     }
 }
 
+/// Normalizes alpha to opaque, then fingerprints dimensions, transform and pixels.
+fn fingerprint(request: &CaptureRequest, pixels: &mut Pixels) -> String {
+    for pixel in pixels.map.chunks_exact_mut(4) {
+        pixel[3] = 255;
+    }
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(&pixels.width.to_le_bytes());
+    hasher.update(&pixels.height.to_le_bytes());
+    hasher.update(&request.sample.transform.to_le_bytes());
+    hasher.update(&pixels.map);
+    hasher.finalize().to_hex().to_string()
+}
+
 pub struct EncodedCapture {
     pub request: CaptureRequest,
     pub result: Result<(String, Option<PreparedImage>)>,
@@ -109,6 +122,9 @@ impl RecordingImages {
         std::thread::Builder::new()
             .name("image-encoder".into())
             .spawn(move || {
+                // One read connection, reopened after a failure, serves every
+                // capture; its statements outlive single encodes.
+                let mut reader: Option<History> = None;
                 while let Ok((request, mut pixels)) = work.recv() {
                     let result = (|| {
                         ensure!(
@@ -116,28 +132,22 @@ impl RecordingImages {
                                 && request.monitor.height == pixels.height,
                             "capture dimensions changed"
                         );
-                        for pixel in pixels.map.chunks_exact_mut(4) {
-                            pixel[3] = 255;
-                        }
-                        let mut hasher = blake3::Hasher::new();
-                        hasher.update(&pixels.width.to_le_bytes());
-                        hasher.update(&pixels.height.to_le_bytes());
-                        hasher.update(&request.sample.transform.to_le_bytes());
-                        hasher.update(&pixels.map);
-                        let fingerprint = hasher.finalize().to_hex().to_string();
-                        let history = History::read(&directory)?;
+                        let fingerprint = fingerprint(&request, &mut pixels);
+                        let history = match &reader {
+                            Some(history) => history,
+                            None => reader.insert(History::read(&directory)?),
+                        };
                         if history.find_image(&fingerprint)?.is_some() {
                             return Ok((fingerprint, None));
                         }
                         ensure!(available()? >= config::PRESSURE_STOP_BYTES, "disk_pressure");
-                        let prepared = History::prepare_pixels(
-                            &directory,
-                            pixels.width,
-                            pixels.height,
-                            &pixels.map,
-                        )?;
+                        let prepared =
+                            history.prepare_capture(pixels.width, pixels.height, &pixels.map)?;
                         Ok((fingerprint, Some(prepared)))
                     })();
+                    if result.is_err() {
+                        reader = None;
+                    }
                     drop(pixels);
                     if results.send(EncodedCapture { request, result }).is_err() {
                         break;

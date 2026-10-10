@@ -95,6 +95,7 @@ impl History {
         )?;
         crate::tile_map::upgrade(&connection)?;
         crate::tiles::initialize(directory, &connection)?;
+        crate::queries::initialize(&connection)?;
         Ok(Self {
             connection,
             directory: directory.to_owned(),
