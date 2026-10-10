@@ -303,7 +303,7 @@ async fn authentication_bootstrap_origin_host_and_read_only_mcp() {
     let init = rpc(&app,&bearer,"initialize",json!({"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"test","version":"1"}})).await.1;
     assert_eq!(init["result"]["protocolVersion"], "2025-11-25");
     let list = rpc(&app, &bearer, "tools/list", json!({})).await.1;
-    assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 7);
+    assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 8);
     assert!(
         list["result"]["tools"]
             .as_array()
@@ -469,6 +469,45 @@ async fn browser_and_mcp_share_configured_categories_and_reload_edits() {
     assert_eq!(list["categories"], json!([]));
     let blocks = tool(&app, &bearer, "blocks", args).await["structuredContent"].clone();
     assert!(blocks["items"][0]["category"].is_null());
+}
+#[tokio::test]
+async fn browser_and_mcp_share_focus_metrics_per_activity_day() {
+    let dir = tempfile::tempdir().unwrap();
+    fixture(dir.path());
+    let web = Web::new(dir.path(), HOST).unwrap();
+    let app = web.router();
+    let cookie = session(&app, &web).await;
+    let bearer = format!("Bearer {}", secret(dir.path()).unwrap());
+    let args = json!({"range":{"start_ms":0,"end_ms":10000}});
+    let days =
+        tool(&app, &bearer, "focus_metrics", args.clone()).await["structuredContent"].clone();
+    assert_eq!(days, browser(&app, &cookie, "focus_metrics", args).await.1);
+    assert_eq!(days["days"].as_array().unwrap().len(), 1);
+    let day = &days["days"][0];
+    assert_eq!(day["metrics"]["active_ms"], day["totals"]["focus_ms"]);
+    assert_eq!(day["metrics"]["application_switches"], 0);
+    assert!(day["metrics"]["category_switches"].is_null());
+    assert_eq!(
+        day["metrics"]["longest_stretch"]["subject"],
+        json!({"kind":"application","name":"editor"})
+    );
+    let overview = tool(
+        &app,
+        &bearer,
+        "overview",
+        json!({"range":day["range"].clone(),"limit":1}),
+    )
+    .await["structuredContent"]
+        .clone();
+    assert_eq!(overview["metrics"], day["metrics"]);
+    let invalid = tool(
+        &app,
+        &bearer,
+        "focus_metrics",
+        json!({"range":{"start_ms":0,"end_ms":32 * 86_400_000_i64}}),
+    )
+    .await;
+    assert_eq!(invalid["isError"], true);
 }
 #[tokio::test]
 async fn selected_images_missing_files_expiry_and_shared_busy_limits() {

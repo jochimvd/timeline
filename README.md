@@ -439,6 +439,7 @@ Read-only tools:
 | Tool | Arguments |
 | --- | --- |
 | `overview` | `date` (YYYY-MM-DD) **or** `range: {start_ms, end_ms}`, optional `cursor`, `limit` |
+| `focus_metrics` | `date` **or** `range` (at most 31 days); per-day totals and [focus metrics](#focus-metrics) |
 | `categories` | none; the configured category rules |
 | `blocks` / `observations` | `range`, optional `cursor`, `limit` |
 | `observation` | original observation `id` |
@@ -452,8 +453,9 @@ continuation cursors, and fetch images only where useful. Focus is evidence rath
 than task attribution; keep ambiguity unassigned, gaps unknown, and avoid counting
 the same elapsed time once per monitor. Overview category totals and the category on
 blocks and exact titles are the user's own classification and a useful starting
-point, but they are not task attribution either. Tasks, estimates and corrections belong
-in the agent conversation.
+point, but they are not task attribution either. Focus metrics (in `overview` and
+per day in `focus_metrics`) describe observed switching and sustained focus, not
+productivity. Tasks, estimates and corrections belong in the agent conversation.
 
 Query admission remains two expensive reads globally, at most one from MCP.
 Adapters allow four blocking operations and sixteen active request handlers,

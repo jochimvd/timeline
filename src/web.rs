@@ -424,6 +424,7 @@ fn evidence(
             a.display_points,
             a.since.as_deref().ok_or_else(invalid)?,
         )?)?,
+        "focus_metrics" => serde_json::to_value(queries.focus_metrics(client, selection()?)?)?,
         "activity_bounds" => serde_json::to_value(queries.activity_bounds(client, selection()?)?)?,
         "adjacent_screenshot" => serde_json::to_value(queries.adjacent_screenshot(
             client,
@@ -600,16 +601,30 @@ fn tool_definitions() -> Value {
     let range = json!({"type":"object","properties":{"start_ms":{"type":"integer"},"end_ms":{"type":"integer"}},"required":["start_ms","end_ms"],"additionalProperties":false});
     let page =
         json!({"cursor":{"type":"string"},"limit":{"type":"integer","minimum":1,"maximum":500}});
+    let zone = crate::config::activity_timezone();
     let overview = format!(
-        "Overview of an activity date (04:00 {}) or half-open range, at most 31 days. \
+        "Overview of an activity date (04:00 {zone}) or half-open range, at most 31 days. \
         Page all breakdown rows: category totals (every configured category in order, then \
         uncategorized as category null), application and exact-title totals (titles carry \
         their category), then focus and screenshot coverage. Focus includes idle; gaps are \
-        unknown, not task time.",
-        crate::config::activity_timezone()
+        unknown, not task time. `metrics` summarizes the range as in focus_metrics."
+    );
+    let metrics = format!(
+        "Focus metrics per activity day (04:00 {zone}) of a date or half-open range, at most 31 \
+        days, with each day's focus totals. active_ms is non-idle focus. Context switches count \
+        application (and, with categories, category) changes between consecutive focus within \
+        continuous non-idle evidence; idle, gaps, pause/lock and timing boundaries never count. \
+        Focus stretches are continuous active focus on one category (else application); glances \
+        away under {}s are bridged while they stay within {}% of a stretch. longest_stretch has \
+        a time range to inspect; stretches buckets long >=25 min, medium 10-25, short <10; \
+        hours holds hourly active time and switches. Observed focus patterns only: not task \
+        time and not a productivity judgement.",
+        crate::queries::BRIEF_INTERRUPTION_MS / 1000,
+        crate::queries::MAX_INTERRUPTED_PERCENT,
     );
     let tools: Vec<Value> = [
         ("overview", overview.as_str(), vec![]),
+        ("focus_metrics", metrics.as_str(), vec![]),
         ("categories", "The user's category definitions: ordered rules matching an exact application and/or a regex over the cleaned window title; the first matching category applies. Categories classify observed focus; they are hints, not task attribution.", vec![]),
         ("blocks", "Activity blocks in a half-open range up to 48 hours, each with its category (null when uncategorized). Stable block and observation references; grouping is not task attribution.", vec!["range"]),
         ("observations", "Original window observations in a range up to 48 hours. Page before inferring tasks.", vec!["range"]),
@@ -621,7 +636,8 @@ fn tool_definitions() -> Value {
         if matches!(name, "overview" | "blocks" | "observations" | "screenshots") {
             properties.extend(page.as_object().unwrap().clone()); properties.insert("range".into(), range.clone());
         }
-        if name == "overview" { properties.insert("date".into(), json!({"type":"string","format":"date"})); }
+        if name == "focus_metrics" { properties.insert("range".into(), range.clone()); }
+        if matches!(name, "overview" | "focus_metrics") { properties.insert("date".into(), json!({"type":"string","format":"date"})); }
         if name == "screenshots" { properties.insert("monitor".into(), json!({"type":"string"})); }
         if matches!(name, "image" | "observation") { properties.insert("id".into(), json!({"type":"integer"})); }
         if name == "image" { properties.insert("max_edge".into(), json!({"type":"integer","minimum":64,"maximum":4096})); }
@@ -674,7 +690,7 @@ async fn mcp(State(state): State<Arc<Web>>, headers: HeaderMap, body: Bytes) -> 
             else {
                 return rpc_error(id, -32602, "Missing protocolVersion");
             };
-            json!({"protocolVersion":if VERSIONS.contains(&version) {version} else {"2025-11-25"},"capabilities":{"tools":{}},"serverInfo":{"name":"timeline","version":env!("CARGO_PKG_VERSION")},"instructions":"Read metadata first. Focus is not task time; categories are the user's rule-based focus classification, useful hints but not task attribution. Keep ambiguity unassigned and gaps unknown. Do not double count monitors; cite evidence IDs. Tasks and corrections belong in conversation."})
+            json!({"protocolVersion":if VERSIONS.contains(&version) {version} else {"2025-11-25"},"capabilities":{"tools":{}},"serverInfo":{"name":"timeline","version":env!("CARGO_PKG_VERSION")},"instructions":"Read metadata first. Focus is not task time; categories are the user's rule-based focus classification, useful hints but not task attribution. Focus metrics describe observed switching and sustained focus, not productivity. Keep ambiguity unassigned and gaps unknown. Do not double count monitors; cite evidence IDs. Tasks and corrections belong in conversation."})
         }
         "ping" => json!({}),
         "tools/list" => tool_definitions(),
@@ -685,6 +701,7 @@ async fn mcp(State(state): State<Arc<Web>>, headers: HeaderMap, body: Bytes) -> 
             if !matches!(
                 name,
                 "overview"
+                    | "focus_metrics"
                     | "categories"
                     | "blocks"
                     | "observations"
