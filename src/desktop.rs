@@ -16,95 +16,41 @@ pub struct Hyprland {
     events: UnixStream,
     directory: PathBuf,
     buffer: Vec<u8>,
-    current: Option<Window>,
-    pending: Option<(String, String)>,
+    focus: FocusEvents,
 }
 
 impl Hyprland {
     pub fn connect(directory: &Path) -> Result<Self> {
         // Subscribe before taking the initial snapshot, so changes during startup
         // remain visible. The snapshot itself is only published after queued events.
-        let events = UnixStream::connect(directory.join(".socket2.sock"))?;
-        events.set_nonblocking(true)?;
+        let events = subscribe(directory)?;
         let current = snapshot(directory)?;
         Ok(Self {
             events,
             directory: directory.into(),
             buffer: Vec::new(),
-            current,
-            pending: None,
+            focus: FocusEvents {
+                current,
+                pending: None,
+            },
         })
     }
 
     pub fn current(&self) -> Option<Window> {
-        self.current.clone()
+        self.focus.current.clone()
     }
 
     /// Drain received focus changes in their wire order. Overflow is a coverage
     /// failure, never silent event coalescing.
     pub fn drain(&mut self) -> Result<Vec<Option<Window>>> {
-        let mut chunk = [0; 8192];
-        loop {
-            match self.events.read(&mut chunk) {
-                Ok(0) => bail!("Hyprland event socket disconnected"),
-                Ok(n) => {
-                    ensure!(
-                        self.buffer.len() + n <= MAX_BATCH,
-                        "Hyprland event backlog exceeded limit"
-                    );
-                    self.buffer.extend_from_slice(&chunk[..n]);
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
-                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
-                Err(error) => return Err(error.into()),
-            }
-        }
+        self.receive()?;
         let mut changes = Vec::new();
         let mut consumed = 0;
         while let Some(length) = self.buffer[consumed..].iter().position(|b| *b == b'\n') {
             ensure!(length <= MAX_LINE, "Hyprland event exceeded message limit");
-            let line = std::str::from_utf8(&self.buffer[consumed..consumed + length])?;
+            self.focus
+                .apply(&self.buffer[consumed..consumed + length], &mut changes)?;
             consumed += length + 1;
-            let Some((event, data)) = line.split_once(">>") else {
-                bail!("malformed Hyprland event")
-            };
-            match event {
-                "activewindow" => {
-                    let (application, title) = data
-                        .split_once(',')
-                        .context("malformed active window event")?;
-                    self.pending = Some((application.into(), title.into()));
-                }
-                "activewindowv2" => {
-                    if data.is_empty() {
-                        self.current = None;
-                        self.pending = None;
-                    } else {
-                        let (application, title) = self
-                            .pending
-                            .take()
-                            .context("active window identity arrived without its details")?;
-                        self.current = Some(Window {
-                            address: address(data),
-                            application,
-                            title,
-                        });
-                    }
-                    changes.push(self.current.clone());
-                }
-                "windowtitlev2" => {
-                    let (window_address, title) = data
-                        .split_once(',')
-                        .context("malformed window title event")?;
-                    if let Some(current) = &mut self.current
-                        && current.address == address(window_address)
-                    {
-                        current.title = title.into();
-                        changes.push(self.current.clone());
-                    }
-                }
-                _ => (),
-            }
             ensure!(
                 changes.len() <= 500,
                 "too many focus observations in one batch"
@@ -123,19 +69,98 @@ impl Hyprland {
     pub fn refresh(&mut self) -> Result<Option<Window>> {
         // A new subscription is the generation boundary: neither partial bytes
         // nor half of a paired activewindow event can survive pause/lock/resume.
-        let events = UnixStream::connect(self.directory.join(".socket2.sock"))?;
-        events.set_nonblocking(true)?;
-        self.events = events;
+        self.events = subscribe(&self.directory)?;
         self.buffer.clear();
-        self.pending = None;
-        self.current = snapshot(&self.directory)?;
+        self.focus.pending = None;
+        self.focus.current = snapshot(&self.directory)?;
         // Events concurrent with the snapshot are drained by the next poll.
         Ok(self.current())
+    }
+
+    fn receive(&mut self) -> Result<()> {
+        let mut chunk = [0; 8192];
+        loop {
+            match self.events.read(&mut chunk) {
+                Ok(0) => bail!("Hyprland event socket disconnected"),
+                Ok(n) => {
+                    ensure!(
+                        self.buffer.len() + n <= MAX_BATCH,
+                        "Hyprland event backlog exceeded limit"
+                    );
+                    self.buffer.extend_from_slice(&chunk[..n]);
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => return Ok(()),
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(error) => return Err(error.into()),
+            }
+        }
+    }
+}
+
+/// Focus state carried across event lines; `activewindow` details pair with the
+/// following `activewindowv2` identity.
+struct FocusEvents {
+    current: Option<Window>,
+    pending: Option<(String, String)>,
+}
+
+impl FocusEvents {
+    /// Window titles are arbitrary bytes. They are decoded lossily, so one
+    /// window cannot keep the source disconnected while it stays focused.
+    fn apply(&mut self, line: &[u8], changes: &mut Vec<Option<Window>>) -> Result<()> {
+        let line = String::from_utf8_lossy(line);
+        let Some((event, data)) = line.split_once(">>") else {
+            bail!("malformed Hyprland event")
+        };
+        match event {
+            "activewindow" => {
+                let (application, title) = data
+                    .split_once(',')
+                    .context("malformed active window event")?;
+                self.pending = Some((application.into(), title.into()));
+            }
+            "activewindowv2" => {
+                if data.is_empty() {
+                    self.current = None;
+                    self.pending = None;
+                } else {
+                    let (application, title) = self
+                        .pending
+                        .take()
+                        .context("active window identity arrived without its details")?;
+                    self.current = Some(Window {
+                        address: address(data),
+                        application,
+                        title,
+                    });
+                }
+                changes.push(self.current.clone());
+            }
+            "windowtitlev2" => {
+                let (window_address, title) = data
+                    .split_once(',')
+                    .context("malformed window title event")?;
+                if let Some(current) = &mut self.current
+                    && current.address == address(window_address)
+                {
+                    current.title = title.into();
+                    changes.push(self.current.clone());
+                }
+            }
+            _ => (),
+        }
+        Ok(())
     }
 }
 
 fn address(value: &str) -> String {
     value.trim_start_matches("0x").to_ascii_lowercase()
+}
+
+fn subscribe(directory: &Path) -> Result<UnixStream> {
+    let events = UnixStream::connect(directory.join(".socket2.sock"))?;
+    events.set_nonblocking(true)?;
+    Ok(events)
 }
 
 fn snapshot(directory: &Path) -> Result<Option<Window>> {
@@ -149,7 +174,12 @@ fn snapshot(directory: &Path) -> Result<Option<Window>> {
         bytes.len() <= MAX_LINE,
         "active window response exceeded limit"
     );
-    let value: Value = serde_json::from_slice(&bytes)?;
+    parse_snapshot(&bytes)
+}
+
+/// Invalid UTF-8 (in practice, a title) is replaced before JSON parsing.
+fn parse_snapshot(bytes: &[u8]) -> Result<Option<Window>> {
+    let value: Value = serde_json::from_str(&String::from_utf8_lossy(bytes))?;
     let object = value
         .as_object()
         .context("invalid active window response")?;
@@ -173,4 +203,37 @@ fn snapshot(directory: &Path) -> Result<Option<Window>> {
             .context("window title missing")?
             .into(),
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn invalid_utf8_titles_are_recorded_lossily() {
+        let mut focus = FocusEvents {
+            current: None,
+            pending: None,
+        };
+        let mut changes = Vec::new();
+        for line in [
+            &b"activewindow>>editor,draft \xff title"[..],
+            b"activewindowv2>>abc",
+            b"windowtitlev2>>abc,renamed \xfe",
+        ] {
+            focus.apply(line, &mut changes).unwrap();
+        }
+        let titles: Vec<_> = changes
+            .iter()
+            .map(|w| w.as_ref().unwrap().title.as_str())
+            .collect();
+        assert_eq!(titles, ["draft \u{fffd} title", "renamed \u{fffd}"]);
+        let snapshot = parse_snapshot(
+            b"{\"address\":\"0xABC\",\"class\":\"editor\",\"title\":\"draft \xff\"}",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(snapshot.address, "abc");
+        assert_eq!(snapshot.title, "draft \u{fffd}");
+    }
 }
