@@ -258,9 +258,9 @@ name = "Work"
   ]
 ```
 
-Parents need no rules of their own; a parent's rules catch whatever its
-subcategories don't. Rules match in file order whatever their level, so order
-specific rules first. A rule with `fallback = true` is tried only after every
+Parents need no rules of their own. Rules match in file order whatever their
+level, so order specific rules first; a parent's rules sit above its
+subcategories' and are tried first, unless marked as fallbacks. A rule with `fallback = true` is tried only after every
 other rule, which suits broad keyword guesses that would otherwise take windows
 from categories later in the file. The hierarchy decides how time rolls up: focus
 belongs to the most specific matching category and counts toward each of its
