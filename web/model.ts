@@ -269,9 +269,13 @@ export function createTimelineApp() {
       const { overview, raw, commits } = await readRange(range, signal);
       if (generation !== rangeGeneration) return;
       loadedDate = date;
+      // A chosen date shows only its own evidence; a drag across midnight keeps the selection in view.
+      const elsewhere = center === undefined && selected === undefined && view.evidenceTime !== null
+        && (view.evidenceTime < day.start_ms || view.evidenceTime >= day.end_ms);
       publishRows(raw, overview, overview.revision, range, { ...commits,
         day, timezone: resolved.timezone, visible: range, zoom, fitWidth, dayLoading: false,
-        ...(view.frames === null ? { selected: selected ?? range.start_ms } : {}),
+        ...(elsewhere ? { frames: null, shots: [], focus: [], shotsExpired: false, evidenceTime: null, evidenceError: "", skip: null } : {}),
+        ...(elsewhere || view.frames === null ? { selected: selected ?? range.start_ms } : {}),
       });
       if (selected !== undefined && view.date === date && intent === interactionGeneration) await select(selected);
     } catch (error) {
@@ -423,8 +427,21 @@ export function createTimelineApp() {
     }
     await select(range.start_ms);
   }
+  /** Selects the newest capture of the current activity day, since the present
+   *  moment has no screenshot until the next capture; without one, now itself. */
   async function jumpNow() {
-    const ms = Date.now();
+    navigationAbort.abort(); navigationAbort = new AbortController();
+    const signal = navigationAbort.signal;
+    const now = Date.now();
+    let ms = now;
+    try {
+      const latest = await query<number | null>("adjacent_screenshot", { selected_ms: now + 1, direction: -1,
+        ...(view.layout.startsWith("monitor:") ? { monitor: view.layout.slice(8) } : {}) }, signal);
+      if (latest !== null && activityDate(latest) === activityDate(now)) ms = latest;
+    } catch (error) {
+      if (signal.aborted) return;
+      failure(error);
+    }
     if (activityDate(ms) !== view.date) { await loadDay(activityDate(ms), ms, ms); return; }
     setVisible(ms);
     void loadRange();

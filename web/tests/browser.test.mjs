@@ -355,7 +355,8 @@ test("day view: screenshots, timeline, sessions, breakdown, monitors and obsolet
     release();
     await page.waitForTimeout(150);
     assert.equal(await page.locator("#date").getAttribute("value"), "2026-09-23");
-    assert.equal(await page.locator("#images canvas").count(), 1, "date navigation must preserve the selected image");
+    assert.equal(await page.locator("#images canvas").count(), 0, "a chosen day without captures shows none from another day");
+    assert.match(await page.locator("#images").innerText(), /Pick a moment/);
     assert.equal(await page.locator("#zoom").inputValue(), "1", "a day without activity opens whole");
     await page.unroute("**/api/query/resolve_range");
     await page.locator("#previous").click();
@@ -635,6 +636,11 @@ test("day view: screenshots, timeline, sessions, breakdown, monitors and obsolet
     await timelineIdle(page);
     assert.equal(await page.locator("#zoom").inputValue(), "fit");
     assert.equal(await page.locator("#images").innerHTML(), beforeFitImage);
+    // Now selects the day's newest capture: the present moment has none until the next.
+    await page.clock.setFixedTime(new Date(BASE + 3_900_000));
+    await page.locator("#now").click();
+    await page.waitForFunction(() => document.querySelector("#selected").textContent === "05:00:05" && document.querySelector("#images").getAttribute("aria-busy") === "false");
+    assert.equal(await page.locator("#images canvas").count(), 1, "the newest capture, five minutes before now");
     await page.clock.setFixedTime(new Date(BASE + 86400000 + 5000));
     await page.locator("#now").click();
     await page.waitForFunction(() => document.querySelector("#date").value === "2026-09-23" && document.querySelector("#images").getAttribute("aria-busy") === "false" && document.querySelector("#timeline").getAttribute("aria-busy") === "false");
