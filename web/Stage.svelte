@@ -2,7 +2,7 @@
   import Icon from "./Icon.svelte";
   import ScreenshotCanvas from "./ScreenshotCanvas.svelte";
   import { tick } from "svelte";
-  import { captureTime, imageTransform, noScreenshot, time } from "./format";
+  import { captureTime, elapsed, imageTransform, noScreenshot, time } from "./format";
   import type { ImageFrame } from "./images";
   import type { TimelineApp, View } from "./model";
   import { initial, type Painter } from "./paint";
@@ -26,10 +26,12 @@
   async function enlarge(frame: ImageFrame) { nativeSize = false; enlarged = frame; await tick(); dialog.showModal(); }
   function close() { dialog.close(); enlarged = null; }
   function previewKey(event: KeyboardEvent) {
-    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+    const direction = { ArrowLeft: -1, ArrowRight: 1, ",": -1, ".": 1 }[event.key];
+    if (!direction) return;
     event.preventDefault();
-    void app.stepScreenshot(event.key === "ArrowLeft" ? -1 : 1);
+    void app.stepScreenshot(direction, event.key === "," || event.key === ".");
   }
+  const skip = $derived(view.skip?.at === view.selected ? view.skip : null);
   async function zoomImage(event: MouseEvent) {
     const button = event.currentTarget as HTMLButtonElement;
     const image = button.querySelector("canvas")!;
@@ -58,6 +60,10 @@
     <div class="when">
       <h2 id="selected" class="num">{view.evidenceTime === null ? "No moment selected" : time(view.evidenceTime, view.timezone)}</h2>
       {#if view.evidenceLoading}<span class="spinner" aria-label="Loading"></span>{/if}
+      {#if skip}
+        <span class="skip" title="Screenshots with only a few small changes, like a clock, are passed over. Use , and . to step one screenshot.">
+          skipped {skip.count} unchanged · {elapsed(skip.ms)}</span>
+      {/if}
     </div>
     <div class="actions">
       {#if monitors.length > 1 || single}
@@ -76,7 +82,8 @@
   </header>
 
   <div id="images" class="viewport" class:dim={view.evidenceLoading} class:multi={(frames?.length ?? 0) > 1} aria-busy={view.evidenceLoading}>
-    <button class="nav prev" aria-label="Previous screenshot" disabled={view.dayLoading} onclick={() => void app.stepScreenshot(-1)}>
+    <button class="nav prev" aria-label="Previous change" title="Previous change (←) · Alt-click or , for one screenshot" disabled={view.dayLoading}
+      onclick={event => void app.stepScreenshot(-1, event.altKey)}>
       <Icon name="chevron-left" size={22} /></button>
     {#if view.evidenceError}<p class="empty error" role="alert">{view.evidenceError}</p>{/if}
     {#if frames === null}
@@ -107,7 +114,8 @@
         </div>
       {/each}
     {/if}
-    <button class="nav next" aria-label="Next screenshot" disabled={view.dayLoading} onclick={() => void app.stepScreenshot(1)}>
+    <button class="nav next" aria-label="Next change" title="Next change (→) · Alt-click or . for one screenshot" disabled={view.dayLoading}
+      onclick={event => void app.stepScreenshot(1, event.altKey)}>
       <Icon name="chevron-right" size={22} /></button>
   </div>
 
@@ -158,6 +166,7 @@
   .when { display: flex; align-items: center; gap: 10px; }
   .when h2 { font-size: 15px; font-weight: 600; letter-spacing: -0.01em; }
   .actions { display: flex; align-items: center; gap: 8px; }
+  .skip { font-size: 12px; color: var(--muted); white-space: nowrap; }
   .viewport {
     position: relative; flex: 1; min-height: 0; display: flex; gap: 12px; align-items: center; justify-content: center;
     padding: 12px; background: var(--sunken);

@@ -83,7 +83,8 @@
       event.preventDefault();
       const direction = event.key === "ArrowRight" ? 1 : -1;
       if (event.shiftKey) app.pan(direction); else void app.stepScreenshot(direction);
-    } else if (event.key === "+" || event.key === "=" || event.key === "-") { event.preventDefault(); app.stepZoom(event.key === "-" ? -1 : 1); }
+    } else if (event.key === "," || event.key === ".") { event.preventDefault(); void app.stepScreenshot(event.key === "." ? 1 : -1, true); }
+    else if (event.key === "+" || event.key === "=" || event.key === "-") { event.preventDefault(); app.stepZoom(event.key === "-" ? -1 : 1); }
     else if (event.key === "[" || event.key === "]") { event.preventDefault(); app.shiftDate(event.key === "]" ? 1 : -1); }
     else if (event.key === "Home") { event.preventDefault(); void app.jumpNow(); }
   }
@@ -154,7 +155,7 @@
     <div class="main">
       <Stage view={$view} {app} {paint} />
       <Scrubber view={$view} {app} {paint} {sessions} evidence={day?.evidence ?? null} />
-      <p class="hints muted"><kbd>←</kbd><kbd>→</kbd> screenshots · <kbd>Shift</kbd>+<kbd>←</kbd><kbd>→</kbd> pan · <kbd>+</kbd><kbd>−</kbd> zoom ·
+      <p class="hints muted"><kbd>←</kbd><kbd>→</kbd> next change · <kbd>,</kbd><kbd>.</kbd> one screenshot · <kbd>Shift</kbd>+<kbd>←</kbd><kbd>→</kbd> pan · <kbd>+</kbd><kbd>−</kbd> zoom ·
         <kbd>[</kbd><kbd>]</kbd> day · <kbd>Home</kbd> now · drag to pan, scroll to zoom</p>
     </div>
     <aside class="panel card">

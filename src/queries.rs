@@ -46,7 +46,7 @@ pub use metrics::{
     HourlyFocus, LONG_STRETCH_MS, MAX_INTERRUPTED_PERCENT, MEDIUM_STRETCH_MS, StretchBucket,
     StretchDistribution,
 };
-pub use navigation::ActivityBounds;
+pub use navigation::{ActivityBounds, ScreenshotStep};
 use overview::cached_overview;
 use paging::{Cursor, Pager, decode_cursor, encode_cursor};
 use scan::ScanObservation;

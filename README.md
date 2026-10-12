@@ -131,6 +131,14 @@ own client class rather than accepting it from a request. The service offers:
   millisecond, including actual capture timestamps, unavailable samples, stale
   flags and whether screenshots there have expired. Repeated wall times return
   distinct timing segments.
+- `screenshot_step`: the next or previous capture that looks different from what
+  is shown at a selected millisecond, optionally on one monitor, and how many
+  captures it passed over. A capture looks different when more than three of its
+  256 × 256 tiles differ from the frame on screen (so a ticking clock does not
+  count, but small edits add up), when the focused window changes, or after more
+  than a minute without captures. One step looks at most three hours or 5,000
+  captures ahead; without a difference it lands on the furthest one. The browser
+  only.
 - `image`: retrieve the exact screenshot ID and its metadata with a bounded byte
   stream; missing/expired references or files return `QueryError::Unavailable`.
   `preview` returns a lossy rendition of at most 64–4096 pixels per edge instead.
@@ -735,8 +743,10 @@ before its one overview read), selecting its first session if nothing is
 selected yet. Timeline zoom supports windows down to one minute via the zoom
 control or mouse wheel. Screenshot stepping skips unavailable
 samples and duplicate monitor timestamps, respects a selected monitor, and can
-cross activity days. Dragging also pans across days, preserving the selected
-image and fetching history on release. Arrow keys step screenshots; Shift+arrows
+cross activity days. Arrow keys and the step buttons move to the next capture
+that looks different (`screenshot_step`) and note how much they passed over;
+`,` and `.` or Alt-click step one capture at a time. Dragging also pans across days, preserving the selected
+image and fetching history on release. Arrow keys step through changes; Shift+arrows
 pan, +/- zoom, and Home jumps to now. Fit activity frames observed focus and
 available screenshot coverage rather than empty hours.
 Click an enlarged screenshot to toggle between fitting the window and native

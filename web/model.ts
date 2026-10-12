@@ -34,6 +34,8 @@ export type View = {
   evidenceTime: number | null;
   hoverEvidence: { time: number | null; focus: Coverage[]; frames: ImageFrame[] | null; expired: boolean; error: string; loading: boolean };
   evidenceError: string; message: string;
+  /** The last step's landing time and what it passed over as unchanged. */
+  skip: { at: number; count: number; ms: number } | null;
 };
 
 /** All asynchronous transitions publish complete view state; views never manage requests. */
@@ -43,7 +45,7 @@ export function createTimelineApp() {
     navigationBusy: false, selected: 0, dayLoading: true, rangeLoading: false, highlight: null,
     evidenceLoading: false, blocks: [], rows: [], categories: [], commits: null, commitError: "", focus: [], shots: [], frames: null, shotsExpired: false,
     hoverEvidence: { time: null, focus: [], frames: null, expired: false, error: "", loading: false },
-    evidenceTime: null, evidenceError: "", message: "",
+    evidenceTime: null, evidenceError: "", message: "", skip: null,
   };
   const store = writable(view);
   const patch = (values: Partial<View>) => { view = { ...view, ...values }; store.set(view); };
@@ -448,16 +450,25 @@ export function createTimelineApp() {
     } catch (error) { failure(error); }
     finally { if (!signal.aborted) patch({ navigationBusy: false }); }
   }
-  async function stepScreenshot(direction: number) {
+  /** Steps to the next screenshot that looks different, or with `exact` to the very next one. */
+  async function stepScreenshot(direction: number, exact = false) {
     navigationAbort.abort(); navigationAbort = new AbortController();
     const signal = navigationAbort.signal;
     patch({ navigationBusy: true });
     try {
-      const ms = await query<number | null>("adjacent_screenshot", { selected_ms: view.selected, direction,
-        ...(view.layout.startsWith("monitor:") ? { monitor: view.layout.slice(8) } : {}) }, signal);
+      const from = view.selected;
+      const options = { selected_ms: from, direction, ...(view.layout.startsWith("monitor:") ? { monitor: view.layout.slice(8) } : {}) };
+      const step = exact
+        ? { unix_ms: await query<number | null>("adjacent_screenshot", options, signal), skipped: 0, skipped_ms: 0 }
+        : await query<{ unix_ms: number | null; skipped: number; skipped_ms: number }>("screenshot_step", options, signal);
       signal.throwIfAborted();
-      if (ms === null) patch({ message: direction < 0 ? "No earlier screenshot." : "No later screenshot." });
-      else await navigateTo(ms);
+      if (step.unix_ms === null) patch({ message: direction < 0 ? "No earlier screenshot." : "No later screenshot." });
+      else {
+        await navigateTo(step.unix_ms);
+        // Selecting ends this navigation; the selection says whether it landed.
+        if (view.selected === step.unix_ms)
+          patch({ skip: step.skipped ? { at: step.unix_ms, count: step.skipped, ms: step.skipped_ms } : null });
+      }
     } catch (error) { failure(error); }
     finally { if (!signal.aborted) patch({ navigationBusy: false }); }
   }

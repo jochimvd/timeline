@@ -592,15 +592,32 @@ test("day view: screenshots, timeline, sessions, breakdown, monitors and obsolet
     const navBox = await timeline.boundingBox();
     await timeline.dispatchEvent("click", { clientX: navBox.x, clientY: y });
     await imagesIdle(page);
+    // "." steps exactly one capture; the fixture's captures are all the same image.
     const nextCapture = page.waitForRequest(request => request.url().endsWith("/api/query/selection") && request.postDataJSON().selected_ms === BASE + 5000);
-    await timeline.press("ArrowRight");
+    await timeline.press(".");
     await nextCapture;
     await imagesIdle(page);
-    // Arrow keys work from anywhere on the page, too.
+    // Keys work from anywhere on the page, too.
     const previousCapture = page.waitForRequest(request => request.url().endsWith("/api/query/selection") && request.postDataJSON().selected_ms === BASE);
     await page.evaluate(() => document.activeElement.blur());
-    await page.keyboard.press("ArrowLeft");
+    await page.keyboard.press(",");
     await previousCapture;
+    await imagesIdle(page);
+    // Arrows pass over captures that look the same until the window changes, and say so.
+    const changed = page.waitForRequest(request => request.url().endsWith("/api/query/selection") && request.postDataJSON().selected_ms > BASE + 5000);
+    await page.keyboard.press("ArrowRight");
+    const landed = (await changed).postDataJSON().selected_ms;
+    await imagesIdle(page);
+    // It stops after the fixture's capture pause, which the note leaves out.
+    assert.equal(landed, BASE + 3605000);
+    assert.equal(await page.locator(".stage .skip").innerText(), "skipped 118 unchanged · 10 min");
+    const back = page.waitForRequest(request => request.url().endsWith("/api/query/selection") && request.postDataJSON().selected_ms < landed);
+    await page.keyboard.press("ArrowLeft");
+    await back;
+    await imagesIdle(page);
+    await page.keyboard.press(",");
+    await page.waitForFunction(() => !document.querySelector(".stage .skip"));
+    await timeline.dispatchEvent("click", { clientX: navBox.x, clientY: y });
     await imagesIdle(page);
     const beforeFitImage = await page.locator("#images").innerHTML();
     const fitQuery = page.waitForRequest(request => request.url().endsWith("/api/query/overview") && request.postDataJSON().range);

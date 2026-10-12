@@ -1540,3 +1540,109 @@ fn screenshots_expire_before_observations_and_selection_says_so() {
             .all(|row| !matches!(row.focus, FocusCoverage::Focus { .. }))
     );
 }
+
+#[test]
+fn screenshot_steps_pass_over_small_changes_but_not_windows_or_pauses() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = History::open(dir.path()).unwrap();
+    // Window A until 33 s, then B; checkpoints keep focus known throughout.
+    put(
+        &mut h,
+        1000,
+        1000,
+        1,
+        StateChange::Focus,
+        state(Some("A"), false),
+    );
+    for wall in (5000..=130_000).step_by(4000) {
+        if wall == 33_000 {
+            put(
+                &mut h,
+                wall,
+                wall,
+                1,
+                StateChange::Focus,
+                state(Some("B"), false),
+            );
+        } else {
+            let title = if wall < 33_000 { "A" } else { "B" };
+            put(
+                &mut h,
+                wall,
+                wall,
+                1,
+                StateChange::Checkpoint,
+                state(Some(title), false),
+            );
+        }
+    }
+    // Eight 256 × 256 tiles in a row, each painted with the shade given for it.
+    let mut capture = |wall: i64, shades: [u8; 8]| {
+        let (width, height) = (2048u32, 256u32);
+        let mut pixels = Vec::with_capacity((width * height * 4) as usize);
+        for _ in 0..height {
+            for x in 0..width {
+                let shade = shades[(x / 256) as usize];
+                pixels.extend_from_slice(&[shade, shade, shade, 255]);
+            }
+        }
+        let image = History::prepare_pixels(dir.path(), width, height, &pixels).unwrap();
+        let sample = ScreenshotSample {
+            width,
+            height,
+            ..sample(wall, "A")
+        };
+        h.commit_screenshot(&sample, &format!("frame-{wall}"), &image)
+            .unwrap();
+    };
+    capture(10_000, [0; 8]);
+    capture(15_000, [0; 8]);
+    capture(20_000, [9, 0, 0, 0, 0, 0, 0, 0]); // a clock tick
+    capture(25_000, [9, 9, 9, 0, 0, 0, 0, 0]); // three tiles away from 10 s
+    capture(30_000, [9, 9, 9, 9, 0, 0, 0, 0]); // four: small edits add up
+    capture(35_000, [9, 9, 9, 9, 0, 0, 0, 0]); // same pixels, window B
+    capture(120_000, [9, 9, 9, 9, 0, 0, 0, 0]); // after a pause
+    capture(125_000, [9, 9, 9, 9, 0, 0, 0, 0]);
+    let q = Queries::open(dir.path()).unwrap();
+    let step = |selected_ms, direction, monitor| {
+        let step = q
+            .screenshot_step(Browser, selected_ms, direction, monitor)
+            .unwrap();
+        (step.unix_ms, step.skipped, step.skipped_ms)
+    };
+    assert_eq!(step(10_000, 1, None), (Some(30_000), 3, 15_000));
+    assert_eq!(
+        step(12_000, 1, None),
+        (Some(30_000), 3, 13_000),
+        "compared with the frame on screen"
+    );
+    assert_eq!(step(30_000, -1, None), (Some(15_000), 2, 10_000));
+    assert_eq!(
+        step(30_000, 1, None),
+        (Some(35_000), 0, 0),
+        "the window changed"
+    );
+    assert_eq!(
+        step(35_000, 1, None),
+        (Some(120_000), 0, 0),
+        "capture paused"
+    );
+    assert_eq!(
+        step(120_000, 1, None),
+        (Some(125_000), 0, 0),
+        "nothing changes before the end"
+    );
+    assert_eq!(step(125_000, 1, None), (None, 0, 0));
+    assert_eq!(step(10_000, -1, None), (None, 0, 0));
+    // Beyond three hours of nothing, the nearest capture still answers.
+    assert_eq!(
+        step(125_000 + 5 * 3_600_000, -1, None),
+        (Some(125_000), 0, 0)
+    );
+    assert_eq!(step(-5 * 3_600_000, 1, None), (Some(10_000), 0, 0));
+    assert_eq!(step(10_000, 1, Some("B")), (None, 0, 0));
+    assert_error(
+        q.screenshot_step(Browser, 0, 0, None),
+        QueryError::InvalidRequest,
+    );
+}

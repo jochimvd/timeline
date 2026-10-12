@@ -7,6 +7,10 @@ export function duration(ms: number) {
   const minutes = Math.round(ms / 60_000);
   return minutes < 60 ? `${minutes} min` : `${Math.floor(minutes / 60)}h${minutes % 60 ? ` ${minutes % 60}m` : ""}`;
 }
+/** Like `duration`, but in seconds below a minute. */
+export function elapsed(ms: number) {
+  return ms < 60_000 ? `${Math.round(ms / 1000)} s` : duration(ms);
+}
 // Intl formatter construction is expensive; labels share one per timezone and style.
 const formatters = new Map<string, Intl.DateTimeFormat>();
 export function formatter(timezone: string, style: string, options: Intl.DateTimeFormatOptions) {

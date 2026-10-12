@@ -162,6 +162,8 @@
       event.stopPropagation();
       const direction = event.key === "ArrowRight" ? 1 : -1;
       if (event.shiftKey) app.pan(direction); else void app.stepScreenshot(direction);
+    } else if (event.key === "," || event.key === ".") {
+      event.preventDefault(); event.stopPropagation(); void app.stepScreenshot(event.key === "." ? 1 : -1, true);
     } else if (["+", "=", "-"].includes(event.key)) {
       event.preventDefault(); event.stopPropagation(); app.stepZoom(event.key === "-" ? -1 : 1);
     } else if (event.key === "Home") { event.preventDefault(); void app.jumpNow(); }
@@ -264,10 +266,10 @@
       {#if view.rangeLoading || view.navigationBusy}<span class="spinner" aria-label="Loading"></span>{/if}
     </div>
     <div class="group">
-      <button class="btn small icon ghost" aria-label="Previous screenshot" title="Previous screenshot (←)" disabled={view.dayLoading}
-        onclick={() => void app.stepScreenshot(-1)}><Icon name="step-back" size={14} /></button>
-      <button class="btn small icon ghost" aria-label="Next screenshot" title="Next screenshot (→)" disabled={view.dayLoading}
-        onclick={() => void app.stepScreenshot(1)}><Icon name="step-forward" size={14} /></button>
+      <button class="btn small icon ghost" aria-label="Previous change" title="Previous change (←) · Alt-click or , for one screenshot" disabled={view.dayLoading}
+        onclick={event => void app.stepScreenshot(-1, event.altKey)}><Icon name="step-back" size={14} /></button>
+      <button class="btn small icon ghost" aria-label="Next change" title="Next change (→) · Alt-click or . for one screenshot" disabled={view.dayLoading}
+        onclick={event => void app.stepScreenshot(1, event.altKey)}><Icon name="step-forward" size={14} /></button>
       <button id="now" class="btn small" disabled={view.dayLoading} onclick={() => void app.jumpNow()} title="Go to now (Home)">
         <Icon name="now" size={14} />Now</button>
     </div>

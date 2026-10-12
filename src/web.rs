@@ -458,6 +458,12 @@ fn evidence(
             a.direction.ok_or_else(invalid)?,
             a.monitor.as_deref(),
         )?)?,
+        "screenshot_step" => serde_json::to_value(queries.screenshot_step(
+            client,
+            a.selected_ms.ok_or_else(invalid)?,
+            a.direction.ok_or_else(invalid)?,
+            a.monitor.as_deref(),
+        )?)?,
         "blocks" => {
             serde_json::to_value(queries.blocks(client, a.range.ok_or_else(invalid)?, page)?)?
         }
