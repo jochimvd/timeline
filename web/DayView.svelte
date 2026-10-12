@@ -103,7 +103,7 @@
         <button id="next" class="btn icon ghost" aria-label="Next day" title="Next day (])" disabled={!$view.day} onclick={() => app.shiftDate(1)}>
           <Icon name="chevron-right" /></button>
         {#if $view.date !== today}
-          <button class="btn small" onclick={() => void app.loadDay(today)}>Today</button>
+          <button id="today" class="btn small" onclick={() => void app.openToday()}>Today</button>
         {/if}
       </div>
       <p class="subtitle muted num">

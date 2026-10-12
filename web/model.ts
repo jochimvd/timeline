@@ -452,6 +452,21 @@ export function createTimelineApp() {
     void loadRange();
     await select(ms);
   }
+  /** Opens the current activity day as the viewer opens: framed on its activity,
+   *  with its newest capture selected. */
+  async function openToday() {
+    navigationAbort.abort(); navigationAbort = new AbortController();
+    const signal = navigationAbort.signal;
+    const today = activityDate(Date.now());
+    let latest: number | null = null;
+    try {
+      latest = await query<number | null>("adjacent_screenshot", { selected_ms: Date.now() + 1, direction: -1 }, signal);
+    } catch (error) {
+      if (signal.aborted) return;
+      failure(error);
+    }
+    await loadDay(today, undefined, latest !== null && activityDate(latest) === today ? latest : undefined);
+  }
   function stepZoom(direction: number) {
     const index = view.zoom === "fit" ? zoomLevels.findIndex(level =>
       (level.durationMs ?? 86_400_000 / Number(level.value)) <= view.fitWidth!) : zoomLevels.findIndex(level => level.value === view.zoom);
@@ -556,6 +571,6 @@ export function createTimelineApp() {
     images.clear();
     hoverImages.clear();
   }
-  return { state: readonly(store), start, dispose, loadDay, select, hover, leave, zoom, pan, panTo, setWidth, shiftDate, jumpNow, reveal, fitActivity, stepScreenshot, stepZoom, navigateTo, layout, attach, setActive };
+  return { state: readonly(store), start, dispose, loadDay, select, hover, leave, zoom, pan, panTo, setWidth, shiftDate, jumpNow, openToday, reveal, fitActivity, stepScreenshot, stepZoom, navigateTo, layout, attach, setActive };
 }
 export type TimelineApp = ReturnType<typeof createTimelineApp>;
