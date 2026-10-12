@@ -358,6 +358,7 @@ test("day view: screenshots, timeline, sessions, breakdown, monitors and obsolet
     assert.equal(await page.locator("#images canvas").count(), 0, "a chosen day without captures shows none from another day");
     assert.match(await page.locator("#images").innerText(), /Pick a moment/);
     assert.equal(await page.locator("#zoom").inputValue(), "1", "a day without activity opens whole");
+    assert.equal(await page.locator(".band .empty").innerText(), "No recorded focus in view", "an empty range says so on the timeline itself");
     await page.unroute("**/api/query/resolve_range");
     await page.locator("#previous").click();
     await page.waitForFunction(() => document.querySelector("#date").value === "2026-09-22"
@@ -646,6 +647,11 @@ test("day view: screenshots, timeline, sessions, breakdown, monitors and obsolet
     const nowAt = await page.locator("#timeline").evaluate((node, now) =>
       (now - Number(node.getAttribute("aria-valuemin"))) / (Number(node.getAttribute("aria-valuemax")) - Number(node.getAttribute("aria-valuemin"))), BASE + 3_900_000);
     assert.ok(Math.abs(nowAt - 0.85) < 0.01, `now sits near the end of the timeline, not its middle (${nowAt})`);
+    // Brief feedback floats over the page instead of pushing it down.
+    const head = await page.locator("#day-totals").boundingBox();
+    await page.keyboard.press(".");
+    await page.waitForFunction(() => document.querySelector("#toasts")?.textContent.includes("No later screenshot."));
+    assert.deepEqual(await page.locator("#day-totals").boundingBox(), head, "a toast moves nothing");
     // Today opens as the viewer does: framed on its activity, its newest capture selected.
     await page.locator("#previous").click();
     await page.waitForFunction(() => document.querySelector("#date").value === "2026-09-21" && document.querySelector("#timeline").getAttribute("aria-busy") === "false");
@@ -823,7 +829,13 @@ test("week and month views summarize days, compare honestly and drill into the d
     // One hour of Planning on Tuesday; Monday has no evidence; Thursday onwards has not begun.
     await page.waitForFunction(() => !document.querySelector("#period-focus").textContent.includes("…"));
     assert.match(await page.locator("#period-focus").innerText(), /1h\s*no comparison/);
+    // Notes about the data sit on the subtitle line as a badge; it opens to the full text.
+    const notice = page.locator(".period .subtitle .badge");
+    await page.waitForFunction(() => document.querySelector(".period .subtitle .badge")?.textContent === "2 notes");
+    await notice.click();
     assert.match(await page.locator("#period-evidence").innerText(), /No recording on 2 days, Mon 21 Sept and Wed 23 Sept/);
+    await page.keyboard.press("Escape");
+    assert.equal(await page.locator("#period-evidence").isVisible(), false);
     const states = await page.locator(".week .column").evaluateAll(columns => columns.map(column =>
       ["missing", "future", "today"].filter(name => column.classList.contains(name)).join(" ") || "recorded"));
     assert.deepEqual(states, ["missing", "recorded", "missing today", "future", "future", "future", "future"]);
@@ -840,7 +852,9 @@ test("week and month views summarize days, compare honestly and drill into the d
       ["", "4", "1", "", "", "", ""], "a day without focus evidence can still have commits");
     assert.equal(await page.locator(".week .commit").count(), 5);
     assert.match(await page.locator("#period-commits").innerText(), /Commits\s+5/);
-    assert.match(await page.locator("#period-evidence").innerText(), /1 repository or path could not be read/);
+    await notice.click();
+    assert.match(await page.locator("#period-evidence").innerText(), /1 repository or path could not be read\s*Repositories/);
+    await page.keyboard.press("Escape");
     await page.locator(".color-by button", { hasText: "App" }).click();
     assert.match(await page.locator("#subject-changes").innerText(), /Editor\s+1h/);
     await page.locator(".color-by button", { hasText: /^Category$/ }).click();

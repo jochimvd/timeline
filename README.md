@@ -550,6 +550,13 @@ with Pause/Resume, and a settings drawer. The drawer shows the category rules,
 the git repositories (paths searched, repositories found, unreadable ones and
 Rescan; without paths, how to add them), storage details and a short guide to the
 terms. Storage details are read when that tab opens and reused for 30 seconds.
+Nothing the page says moves its layout. Caveats about the data on screen (days
+without recording, an incomplete comparison, unreadable commits or day totals)
+sit as one badge at the end of each view's subtitle line, which opens to the
+full notes. Brief feedback, such as no earlier screenshot, floats at the bottom
+for a few seconds; an error stays there until dismissed or its view reads again,
+with Retry for a failed day, range or period. A range without focus says so on
+the timeline itself.
 
 **Day.** A header names the day, with a date picker, previous/next and Today, and
 whole-day figures: focus (active and idle), switches per active hour, the longest

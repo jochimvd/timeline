@@ -2,8 +2,10 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { build } from "esbuild";
 
-const built = await build({ entryPoints: ["web/model.ts"], bundle: true, write: false, format: "esm", platform: "browser" });
-const { createTimelineApp } = await import("data:text/javascript;base64," + Buffer.from(built.outputFiles[0].text).toString("base64"));
+// Toasts are bundled with the model, so the test sees the ones it raises.
+const built = await build({ stdin: { contents: 'export * from "./model.ts"; export { toasts } from "./toasts.ts";', resolveDir: "web", loader: "ts" },
+  bundle: true, write: false, format: "esm", platform: "browser" });
+const { createTimelineApp, toasts } = await import("data:text/javascript;base64," + Buffer.from(built.outputFiles[0].text).toString("base64"));
 const deferred = () => {
   let resolve;
   const promise = new Promise(done => resolve = done);
@@ -104,7 +106,10 @@ test("date transitions retain a complete snapshot through resolution, paging, er
     assert.equal(view.day, loaded.day);
     assert.equal(view.blocks, loaded.blocks);
     assert.equal(view.loadedRange, loaded.loadedRange);
-    assert.equal(view.message, "unavailable");
+    let shown;
+    toasts.subscribe(list => shown = list)();
+    assert.deepEqual(shown.map(toast => [toast.key, toast.text, toast.tone, typeof toast.retry]), [["day", "unavailable", "error", "function"]],
+      "a failed day says why, with a retry");
     assert.equal(view.dayLoading, false);
 
     const oldResponse = deferred(), oldStarted = deferred();

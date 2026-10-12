@@ -1,12 +1,14 @@
 <script lang="ts">
   import DatePicker from "./DatePicker.svelte";
   import Icon from "./Icon.svelte";
+  import Notice, { type Note } from "./Notice.svelte";
   import MonthCalendar from "./MonthCalendar.svelte";
   import Patterns from "./Patterns.svelte";
   import Rhythm from "./Rhythm.svelte";
   import SubjectChanges from "./SubjectChanges.svelte";
   import WeekCalendar from "./WeekCalendar.svelte";
   import { commitDays, commitProblems } from "./commits";
+  import { drawer } from "./drawer";
   import { dateLabel, dateRuns, dateSpan, shortDate, weekNumber } from "./dates";
   import { clock, duration } from "./format";
   import { plural } from "./metrics";
@@ -39,7 +41,6 @@
   const inProgress = $derived(containsDate(shown, today));
   const commitList = $derived($view.commits);
   const commits = $derived(commitList ? commitDays(commitList) : undefined);
-  const commitNote = $derived($view.commitError ? `Commits unavailable: ${$view.commitError}` : commitProblems(commitList));
 
   function change(make: (c: PeriodSummary, p: PeriodSummary) => Delta | undefined): Delta | string | undefined {
     if ($view.comparing && !comparison) return "…";
@@ -63,9 +64,21 @@
     { id: "period-deep", label: "Deep focus", value: deep(current) === null ? "—" : deep(current)!.toFixed(0), unit: "%",
       caption: `${duration(current.long_ms) || "0 min"} in stretches ≥ 25 min`, delta: change(deepDelta) },
   ] : []);
-  const evidenceNote = $derived(!current?.missing.length ? ""
-    : current.missing.length === current.elapsed_days ? `Nothing was recorded ${inProgress ? "so far this" : "in this"} ${kind}`
-    : `No recording on ${current.missing.length === 1 ? "" : `${current.missing.length} days, `}${dateRuns(current.missing)}`);
+  const repositories = { label: "Repositories", run: () => drawer.set("repositories") };
+  const notes = $derived.by(() => {
+    const list: Note[] = [];
+    const missing = current?.missing ?? [];
+    if (missing.length && missing.length === current?.elapsed_days)
+      list.push({ label: "Nothing recorded", text: `Nothing was recorded ${inProgress ? "so far this" : "in this"} ${kind}` });
+    else if (missing.length)
+      list.push({ label: `${plural(missing.length, "day")} not recorded`,
+        text: `No recording on ${missing.length === 1 ? "" : `${missing.length} days, `}${dateRuns(missing)}` });
+    if (comparable && previous?.missing.length)
+      list.push({ label: "Comparison incomplete", text: `${name[0].toUpperCase() + name.slice(1)} has days without recording, so changes partly reflect missing data` });
+    if ($view.commitError) list.push({ label: "Commits unavailable", text: `Commits unavailable: ${$view.commitError}`, warn: true, action: repositories });
+    else if (commitProblems(commitList)) list.push({ label: "Commits incomplete", text: commitProblems(commitList), warn: true, action: repositories });
+    return list;
+  });
   const heading = $derived(kind === "week" ? `Week ${weekNumber(shown.first)}` : dateLabel(shown.first, { month: "long", year: "numeric" }));
   const subheading = $derived(kind === "week" ? dateSpan(shown.first, shown.last) : `${shown.length} days`);
 </script>
@@ -87,7 +100,10 @@
         <button id="period-next" class="btn icon ghost" aria-label={`Next ${kind}`} onclick={() => onperiod(period.first, 1)}><Icon name="chevron-right" /></button>
         {#if !containsDate(period, today)}<button id="period-current" class="btn small" onclick={() => onperiod(null)}>This {kind}</button>{/if}
       </div>
-      <p class="subtitle muted">{subheading}{#if comparison}{` · compared with ${dateSpan(comparison.first, comparison.last)}`}{#if comparison.partial}{` until ${clock(comparison.range.end_ms, timezone)}`}{/if}{/if}</p>
+      <div class="subtitle muted">
+        <span>{subheading}{#if comparison}{` · compared with ${dateSpan(comparison.first, comparison.last)}`}{#if comparison.partial}{` until ${clock(comparison.range.end_ms, timezone)}`}{/if}{/if}</span>
+        <Notice id="period-evidence" {notes} />
+      </div>
     </div>
     <dl class="kpis" id="period-totals" class:loading={$view.loading}>
       {#each tiles as tile (tile.id)}
@@ -118,13 +134,6 @@
     </dl>
   </header>
 
-  {#if evidenceNote || commitNote || (comparison && comparable && previous?.missing.length)}
-    <p class="note" id="period-evidence">
-      <Icon name="info" size={14} />
-      <span>{[evidenceNote, comparable && previous?.missing.length ? `${name[0].toUpperCase() + name.slice(1)} has days without recording, so changes partly reflect missing data` : "", commitNote].filter(Boolean).join(" · ")}</span>
-    </p>
-  {/if}
-
   {#if data && current}
     <div class="layout" class:stale={$view.loading}>
       <div class="main">
@@ -152,7 +161,8 @@
   .head { display: flex; align-items: flex-end; justify-content: space-between; gap: 24px; flex-wrap: wrap; }
   .title-block { display: flex; flex-direction: column; gap: 2px; }
   .date-nav { display: flex; align-items: center; gap: 4px; margin-left: -8px; }
-  .subtitle { font-size: 13px; padding-left: 2px; }
+  /* Tall enough for a notice, so one appearing moves nothing. */
+  .subtitle { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 8px; min-height: 22px; font-size: 13px; padding-left: 2px; }
   .kpis { display: flex; gap: 8px; flex-wrap: wrap; }
   .kpi { display: flex; flex-direction: column; min-width: 140px; padding: 10px 14px; border-radius: var(--radius); background: var(--surface); border: 1px solid var(--border); }
   .kpis.loading .kpi { opacity: 0.6; }
@@ -163,7 +173,6 @@
   .caption.link { color: var(--accent-strong); overflow: hidden; text-overflow: ellipsis; display: block; }
   .delta { margin-left: 8px; font-size: 12px; font-weight: 600; letter-spacing: 0; color: var(--text-2); vertical-align: 2px; }
   .delta.none { font-weight: 500; color: var(--faint); }
-  .note { display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--text-2); padding: 8px 12px; border-radius: var(--radius-sm); background: var(--surface); border: 1px solid var(--border); }
   .layout { display: grid; grid-template-columns: minmax(0, 1fr) 360px; gap: 16px; align-items: start; transition: opacity 0.2s; }
   .layout.stale { opacity: 0.6; }
   .main, .side { display: flex; flex-direction: column; gap: 16px; min-width: 0; }

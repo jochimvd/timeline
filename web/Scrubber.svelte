@@ -314,6 +314,7 @@
           </div>
         {/each}
         {#each idle as row, index (index)}<div class="idle" style={place(row.range!)}></div>{/each}
+        {#if !view.blocks.length && view.loadedRange && !view.rangeLoading}<span class="empty">No recorded focus in view</span>{/if}
       </div>
       {#each shotBands as track (track.monitor)}
         <div class="shots" title={"Screenshots · " + track.monitor}>
@@ -428,6 +429,9 @@
     position: relative; height: 44px; border-radius: 6px; background: var(--sunken); overflow: hidden;
   }
   .band > div { position: absolute; top: 0; bottom: 0; }
+  .band > .empty {
+    position: absolute; inset: 0; display: grid; place-items: center; font-size: 12px; color: var(--muted); pointer-events: none;
+  }
   .segment {
     display: flex; align-items: center; padding: 0 7px; font-size: 11.5px; font-weight: 600;
     border-left: 1px solid var(--sunken); min-width: 1px;

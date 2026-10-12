@@ -3,6 +3,7 @@ import { query, pages } from "./api";
 import type { Session } from "./session";
 import { activityDate as activityDateIn, addDays } from "./dates";
 import { createDayDetails } from "./dayDetails";
+import { dismiss, notify } from "./toasts";
 import { createImageLoader, createImagePool, type ImageFrame } from "./images";
 import type { Range, Block, CategoryRow, CommitList, Coverage, FocusMetrics, Overview, Shot, Evidence, OverviewUpdates } from "./types";
 
@@ -38,7 +39,7 @@ export type View = {
   focus: Coverage[]; shots: Shot[]; frames: ImageFrame[] | null; shotsExpired: boolean;
   evidenceTime: number | null;
   hoverEvidence: { time: number | null; focus: Coverage[]; frames: ImageFrame[] | null; expired: boolean; error: string; loading: boolean };
-  evidenceError: string; message: string;
+  evidenceError: string;
   /** The last step's landing time and what it passed over as unchanged. */
   skip: { at: number; count: number; ms: number } | null;
 };
@@ -50,7 +51,7 @@ export function createTimelineApp() {
     navigationBusy: false, selected: 0, dayLoading: true, rangeLoading: false, highlight: null,
     evidenceLoading: false, blocks: [], rows: [], categories: [], commits: null, commitError: "", focus: [], shots: [], frames: null, shotsExpired: false,
     hoverEvidence: { time: null, focus: [], frames: null, expired: false, error: "", loading: false },
-    evidenceTime: null, evidenceError: "", message: "", skip: null,
+    evidenceTime: null, evidenceError: "", skip: null,
   };
   const store = writable(view);
   const patch = (values: Partial<View>) => { view = { ...view, ...values }; store.set(view); };
@@ -82,9 +83,10 @@ export function createTimelineApp() {
   // Only calendar metadata is cached; activity still comes from a fresh snapshot.
   const resolvedDays = new Map<string, Overview["resolved"]>();
 
-  function failure(error: unknown) {
+  /** Says why the day could not be read, until it is read again. */
+  function failure(error: unknown, retry?: () => void) {
     if (!disposed && !(error instanceof DOMException && error.name === "AbortError"))
-      patch({ message: error instanceof Error ? error.message : String(error) });
+      notify(error instanceof Error ? error.message : String(error), { key: "day", tone: "error", retry });
   }
   function cancelNavigation() {
     navigationAbort.abort();
@@ -136,8 +138,8 @@ export function createTimelineApp() {
     }
     // In tree order, uncategorized last; views rank them as they need.
     const categories = rows.filter(row => row.kind === "category") as CategoryRow[];
-    patch({ ...transition, rows, blocks, categories, totals, metrics, loadedRange: range, rangeLoading: false,
-      message: blocks.length ? "" : "No recorded focus in this range. Coverage and screenshots may differ." });
+    patch({ ...transition, rows, blocks, categories, totals, metrics, loadedRange: range, rangeLoading: false });
+    dismiss("day");
   }
   /** Commits are external evidence: a failure leaves the timeline usable and says why. */
   async function readCommits(range: Range, signal: AbortSignal): Promise<Pick<View, "commits" | "commitError">> {
@@ -177,7 +179,7 @@ export function createTimelineApp() {
       if (generation !== rangeGeneration) return;
       publishRows(raw, overview, overview.revision, range, commits);
     } catch (error) {
-      if (generation === rangeGeneration) { patch({ rangeLoading: false }); failure(error); }
+      if (generation === rangeGeneration) { patch({ rangeLoading: false }); failure(error, () => void loadRange()); }
     }
   }
   async function refresh() {
@@ -298,7 +300,7 @@ export function createTimelineApp() {
     } catch (error) {
       if (generation === rangeGeneration) {
         patch({ dayLoading: false, rangeLoading: false, ...(loadedDate ? { date: loadedDate } : {}) });
-        failure(error);
+        failure(error, () => void loadDay(date, center, selected, anchor));
       }
     }
   }
@@ -493,7 +495,7 @@ export function createTimelineApp() {
     try {
       const result = await query<{ activity: Range | null }>("activity_bounds", { date: view.date }, signal);
       signal.throwIfAborted();
-      if (!result.activity) { patch({ message: "No recorded activity on this day." }); return; }
+      if (!result.activity) { notify("No recorded activity on this day."); return; }
       const range = result.activity;
       patch({ zoom: "fit", fitWidth: fittedWidth(view.day!, range) });
       setVisible((range.start_ms + range.end_ms) / 2);
@@ -513,7 +515,7 @@ export function createTimelineApp() {
         ? { unix_ms: await query<number | null>("adjacent_screenshot", options, signal), skipped: 0, skipped_ms: 0 }
         : await query<{ unix_ms: number | null; skipped: number; skipped_ms: number }>("screenshot_step", options, signal);
       signal.throwIfAborted();
-      if (step.unix_ms === null) patch({ message: direction < 0 ? "No earlier screenshot." : "No later screenshot." });
+      if (step.unix_ms === null) notify(direction < 0 ? "No earlier screenshot." : "No later screenshot.");
       else {
         await navigateTo(step.unix_ms);
         // Selecting ends this navigation; the selection says whether it landed.

@@ -1,6 +1,7 @@
 import { readonly, writable } from "svelte/store";
 import { query } from "./api";
 import { addDays } from "./dates";
+import { dismiss, notify } from "./toasts";
 import { previousSpan, type Period } from "./routes";
 import type { Session } from "./session";
 import type { CategoryList, CommitList, FocusMetricsByDay, FocusSession, Range, SessionList } from "./types";
@@ -31,7 +32,7 @@ export type PeriodState = {
   sessionError: string;
   /** The time the displayed period was read, separating past from future days. */
   now: number;
-  loading: boolean; comparing: boolean; message: string;
+  loading: boolean; comparing: boolean;
 };
 
 /** Week and month data: one `focus_metrics` scan for the period with its
@@ -39,7 +40,7 @@ export type PeriodState = {
 export function createPeriodModel() {
   let state: PeriodState = {
     timezone: Intl.DateTimeFormat().resolvedOptions().timeZone, period: null, shown: null, current: null, comparison: null,
-    categories: [], commits: null, commitError: "", sessions: null, sessionError: "", now: Date.now(), loading: false, comparing: false, message: "",
+    categories: [], commits: null, commitError: "", sessions: null, sessionError: "", now: Date.now(), loading: false, comparing: false,
   };
   const store = writable(state);
   const patch = (values: Partial<PeriodState>) => { state = { ...state, ...values }; store.set(state); };
@@ -98,7 +99,7 @@ export function createPeriodModel() {
     abort.abort();
     abort = new AbortController();
     const signal = abort.signal;
-    patch({ period, loading: !background, ...(background ? {} : { message: "" }) });
+    patch({ period, loading: !background });
     try {
       const [data, categories, commits, sessions] = await Promise.all([
         query<FocusMetricsByDay>("focus_metrics", { dates: { first: period.first, last: period.last } }, signal),
@@ -109,6 +110,7 @@ export function createPeriodModel() {
       if (current !== generation) return;
       const now = Date.now();
       const sameComparison = state.comparison && state.period?.first === period.first && state.current?.resolved.range.start_ms === data.resolved.range.start_ms;
+      dismiss("period");
       patch({ shown: period, current: data, categories: categories.categories, timezone: data.resolved.timezone, now, loading: false,
         comparing: true, ...(sameComparison && background ? {} : { comparison: null }), ...commits, ...sessions });
       if (data.resolved.range.start_ms >= now) { patch({ comparing: false, comparison: null }); return; }
@@ -117,7 +119,9 @@ export function createPeriodModel() {
       patch({ comparison, comparing: false });
     } catch (error) {
       if (current !== generation || signal.aborted) return;
-      patch({ loading: false, comparing: false, message: error instanceof Error ? error.message : String(error) });
+      patch({ loading: false, comparing: false });
+      // Says why until the period is read again.
+      notify(error instanceof Error ? error.message : String(error), { key: "period", tone: "error", retry: () => void load(period) });
     }
   }
   /** Reloads an in-progress period while shown, keeping the displayed one meanwhile. */

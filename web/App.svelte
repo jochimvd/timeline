@@ -4,6 +4,7 @@
   import Icon from "./Icon.svelte";
   import PeriodView from "./PeriodView.svelte";
   import SettingsDrawer from "./SettingsDrawer.svelte";
+  import Toasts from "./Toasts.svelte";
   import { query } from "./api";
   import { categoryNodes, grouping, isNested, type CategoryNode } from "./categories";
   import { activityDate, dateLabel } from "./dates";
@@ -14,6 +15,7 @@
   import { createRecording } from "./recording";
   import { containsDate, parseRoute, period, periodTitle, routeSearch, sameRoute, shiftPeriod, type Route } from "./routes";
   import { startSession, type Session } from "./session";
+  import { dismiss, notify } from "./toasts";
   import type { CategoryList, Range } from "./types";
   const app = createTimelineApp();
   const day = app.state;
@@ -22,7 +24,6 @@
   const recording = createRecording();
   const status = recording.state;
   let session = $state<Session | null>(null);
-  let error = $state("");
   let route = $state<Route>(parseRoute(location.search));
   let categoryList = $state<CategoryList | null>(null);
   let dayAttached = false;
@@ -63,6 +64,8 @@
   }
   function apply() {
     if (!session) return;
+    // An error belongs to the view it came from.
+    dismiss(route.view === "day" ? "period" : "day");
     if (route.view === "day") {
       periods.setActive(false);
       app.setActive(true);
@@ -81,6 +84,7 @@
     if (!session) return;
     history.pushState(null, "", routeSearch({ view: "day", date }));
     route = { view: "day", date };
+    dismiss("period");
     periods.setActive(false);
     app.setActive(true);
     if (!dayAttached) { dayAttached = true; app.attach(session); }
@@ -134,14 +138,16 @@
       void recording.start();
       query<CategoryList>("categories", {}, lifetime.signal).then(list => categoryList = list).catch(() => {});
     }).catch(failure => {
-      if (!lifetime.signal.aborted) error = failure instanceof Error ? failure.message : String(failure);
+      if (!lifetime.signal.aborted) notify(failure instanceof Error ? failure.message : String(failure), { key: "session", tone: "error" });
     });
     return () => {
       lifetime.abort(); clearInterval(clock); window.removeEventListener("popstate", popstate);
       app.dispose(); periods.dispose(); recording.dispose();
     };
   });
-  const message = $derived(error || $status.error || (route.view === "day" ? $day.message : $periodState.message));
+  // A failed pause or resume says why until dismissed.
+  const statusError = $derived($status.error);
+  $effect(() => { if (statusError) untrack(() => notify(statusError, { key: "recording", tone: "error" })); });
 </script>
 
 <div class="shell" class:fill={shown === "day"}>
@@ -185,12 +191,6 @@
     {#if pending}<div class="progress" role="progressbar" aria-label="Loading"></div>{/if}
   </header>
 
-  {#if message}
-    <div id="message" class="message" role="status"><Icon name="info" size={14} />{message}</div>
-  {:else}
-    <div id="message" class="visually-hidden" role="status"></div>
-  {/if}
-
   <main>
     {#if shown === "day"}
       <DayView {app} {nodes} {choice} {today} />
@@ -200,6 +200,7 @@
   </main>
 </div>
 
+<Toasts />
 <SettingsDrawer {categoryList} settingsPath={session?.settingsPath ?? null} {timezone} />
 
 <style>
@@ -240,11 +241,6 @@
   .paused .pulse::after, .off .pulse::after { display: none; }
   .off .pulse { background: var(--faint); }
   @keyframes ping { 0% { transform: scale(0.6); opacity: 0.7; } 80%, 100% { transform: scale(1.4); opacity: 0; } }
-  .message {
-    display: flex; align-items: center; gap: 8px; margin: 12px 20px 0; padding: 8px 12px;
-    border-radius: var(--radius-sm); background: var(--surface-2); border: 1px solid var(--border);
-    color: var(--text-2); font-size: 13px;
-  }
   main { flex: 1; padding: 20px; width: 100%; max-width: 1760px; margin: 0 auto; }
   @media (max-width: 900px) {
     .topbar { gap: 10px; padding: 0 12px; flex-wrap: wrap; height: auto; padding-block: 8px; }

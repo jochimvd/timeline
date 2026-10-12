@@ -3,10 +3,12 @@
   import DatePicker from "./DatePicker.svelte";
   import Icon from "./Icon.svelte";
   import Journal from "./Journal.svelte";
+  import Notice, { type Note } from "./Notice.svelte";
   import Scrubber from "./Scrubber.svelte";
   import Stage from "./Stage.svelte";
   import Summary from "./Summary.svelte";
   import type { CategoryNode } from "./categories";
+  import { commitProblems } from "./commits";
   import { addDays, dateLabel } from "./dates";
   import { drawer } from "./drawer";
   import { clock, clockRange, duration } from "./format";
@@ -46,6 +48,15 @@
   const sessions = $derived($detail.date === shown ? $detail.sessions : null);
   const span = $derived(sessions?.length ? { start_ms: sessions[0].range.start_ms, end_ms: sessions.at(-1)!.range.end_ms } : null);
   const whole = $derived(!!$view.day && !!$view.loadedRange && $view.loadedRange.start_ms <= $view.day.start_ms && $view.loadedRange.end_ms >= $view.day.end_ms);
+
+  const repositories = { label: "Repositories", run: () => drawer.set("repositories") };
+  const notes = $derived.by(() => {
+    const list: Note[] = [];
+    if ($detail.error && $detail.date === shown) list.push({ label: "Totals unavailable", text: `Day totals and sessions unavailable: ${$detail.error}`, warn: true });
+    if ($view.commitError) list.push({ label: "Commits unavailable", text: `Commits unavailable: ${$view.commitError}`, warn: true, action: repositories });
+    else if (commitProblems($view.commits)) list.push({ label: "Commits incomplete", text: commitProblems($view.commits), warn: true, action: repositories });
+    return list;
+  });
 
   let tab = $state<"sessions" | "summary" | "commits">("sessions");
   const commitCount = $derived($view.commits?.configured ? $view.commits.commits.length : null);
@@ -95,10 +106,11 @@
           <button id="today" class="btn small" onclick={() => void app.openToday()}>Today</button>
         {/if}
       </div>
-      <p class="subtitle muted num">
-        {#if span}{clockRange(span, $view.timezone)} · {plural(sessions!.length, "session")}{:else if sessions}No active focus{:else}&nbsp;{/if}
-        {#if shown === today}<span class="live">· live</span>{/if}
-      </p>
+      <div class="subtitle muted num">
+        <span>{#if span}{clockRange(span, $view.timezone)} · {plural(sessions!.length, "session")}{:else if sessions}No active focus{:else}&nbsp;{/if}
+          {#if shown === today}<span class="live">· live</span>{/if}</span>
+        <Notice id="day-notes" {notes} />
+      </div>
     </div>
     <dl class="kpis" id="day-totals" class:loading={!day || $view.dayLoading}>
       <div class="kpi">
@@ -171,7 +183,8 @@
   .title-block { display: flex; flex-direction: column; gap: 2px; }
   .date-nav { display: flex; align-items: center; gap: 4px; margin-left: -8px; }
   .year { color: var(--muted); font-weight: 500; }
-  .subtitle { font-size: 13px; padding-left: 2px; }
+  /* Tall enough for a notice, so one appearing moves nothing. */
+  .subtitle { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 8px; min-height: 22px; font-size: 13px; padding-left: 2px; }
   .live { color: var(--good); }
   .kpis { display: flex; gap: 8px; flex-wrap: wrap; }
   .kpi {
