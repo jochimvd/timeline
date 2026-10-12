@@ -24,7 +24,7 @@ use std::{
         Arc, Mutex, Weak,
         atomic::{AtomicBool, Ordering},
     },
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tokio::sync::Semaphore;
 
@@ -32,11 +32,8 @@ pub const ADDRESS: &str = crate::config::HTTP_ADDRESS;
 const VERSIONS: &[&str] = &["2025-03-26", "2025-06-18", "2025-11-25"];
 const IMAGE_LIMIT: u64 = 24 * 1024 * 1024;
 const MCP_IMAGE_EDGE: u32 = 1920;
+const SESSION_SECONDS: u64 = 12 * 3600;
 
-struct Credentials {
-    bootstrap: HashMap<String, Instant>,
-    sessions: HashMap<String, Instant>,
-}
 struct SelectionWork {
     generation: u64,
     cancelled: Weak<AtomicBool>,
@@ -47,7 +44,10 @@ pub struct Web {
     settings: Option<PathBuf>,
     authority: String,
     secret: String,
-    credentials: Mutex<Credentials>,
+    /// Signs browser session cookies, so sessions survive restarts without being stored.
+    session_key: [u8; 32],
+    /// Single-use launch credentials and when each stops working.
+    bootstrap: Mutex<HashMap<String, Instant>>,
     work: Arc<Semaphore>,
     requests: Arc<Semaphore>,
     selections: Mutex<HashMap<(String, String), SelectionWork>>,
@@ -110,15 +110,17 @@ impl Web {
                 .is_loopback(),
             "HTTP must use loopback"
         );
+        let secret = secret(directory)?;
         Ok(Arc::new(Self {
             directory: directory.into(),
             settings,
             authority: authority.into(),
-            secret: secret(directory)?,
-            credentials: Mutex::new(Credentials {
-                bootstrap: HashMap::new(),
-                sessions: HashMap::new(),
-            }),
+            session_key: blake3::derive_key(
+                "timeline browser session cookie v1",
+                secret.as_bytes(),
+            ),
+            secret,
+            bootstrap: Mutex::new(HashMap::new()),
             work: Arc::new(Semaphore::new(4)),
             requests: Arc::new(Semaphore::new(16)),
             selections: Mutex::new(HashMap::new()),
@@ -163,18 +165,35 @@ impl Web {
     }
     pub fn launch_url(&self) -> Result<String> {
         let token = random_token()?;
-        let mut credentials = self.credentials.lock().unwrap();
-        credentials
-            .bootstrap
-            .retain(|_, until| *until > Instant::now());
-        ensure!(
-            credentials.bootstrap.len() < 16,
-            "too many pending browser launches"
-        );
-        credentials
-            .bootstrap
-            .insert(token.clone(), Instant::now() + Duration::from_secs(60));
+        let mut bootstrap = self.bootstrap.lock().unwrap();
+        bootstrap.retain(|_, until| *until > Instant::now());
+        ensure!(bootstrap.len() < 16, "too many pending browser launches");
+        bootstrap.insert(token.clone(), Instant::now() + Duration::from_secs(60));
         Ok(format!("http://{}/#{}", self.authority, token))
+    }
+    /// A session cookie value: its expiry, a nonce that tells sessions apart, and
+    /// a keyed hash of both. Rotating `http.token` ends every session.
+    fn session_cookie_value(&self, expires: u64, nonce: &str) -> String {
+        let claim = format!("{expires}.{nonce}");
+        let mac = blake3::keyed_hash(&self.session_key, claim.as_bytes());
+        format!("{claim}.{}", mac.to_hex())
+    }
+    fn session_valid(&self, cookie: &str) -> bool {
+        let Some((claim, mac)) = cookie.rsplit_once('.') else {
+            return false;
+        };
+        let Some(expires) = claim
+            .split_once('.')
+            .and_then(|(expires, _)| expires.parse::<u64>().ok())
+        else {
+            return false;
+        };
+        let now = unix_seconds();
+        // Hash equality is constant-time.
+        now < expires
+            && expires <= now + SESSION_SECONDS
+            && blake3::Hash::from_hex(mac)
+                .is_ok_and(|mac| mac == blake3::keyed_hash(&self.session_key, claim.as_bytes()))
     }
     pub fn router(self: &Arc<Self>) -> Router {
         Router::new()
@@ -240,6 +259,11 @@ impl Web {
             .with_state(self.clone())
     }
 }
+fn unix_seconds() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |since| since.as_secs())
+}
 fn header<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
     if headers.get_all(name).iter().count() != 1 {
         return None;
@@ -289,15 +313,8 @@ async fn guard(State(state): State<Arc<Web>>, request: Request, next: Next) -> R
             return failure(StatusCode::BAD_REQUEST, "unsupported_protocol_version");
         }
     } else {
-        if !public {
-            let session = session_cookie(headers);
-            let mut credentials = state.credentials.lock().unwrap();
-            credentials
-                .sessions
-                .retain(|_, until| *until > Instant::now());
-            if !session.is_some_and(|s| credentials.sessions.contains_key(s)) {
-                return failure(StatusCode::UNAUTHORIZED, "unauthorized");
-            }
+        if !public && !session_cookie(headers).is_some_and(|s| state.session_valid(s)) {
+            return failure(StatusCode::UNAUTHORIZED, "unauthorized");
         }
         if request.method() != Method::GET
             && (header(headers, "origin") != Some(origin.as_str())
@@ -335,34 +352,28 @@ struct Bootstrap {
     token: String,
 }
 async fn bootstrap(State(state): State<Arc<Web>>, Json(input): Json<Bootstrap>) -> Response {
-    let mut credentials = state.credentials.lock().unwrap();
-    if !credentials
+    if !state
         .bootstrap
+        .lock()
+        .unwrap()
         .remove(&input.token)
         .is_some_and(|until| until > Instant::now())
     {
         return failure(StatusCode::UNAUTHORIZED, "invalid_bootstrap");
     }
-    credentials
-        .sessions
-        .retain(|_, until| *until > Instant::now());
-    if credentials.sessions.len() >= 16 {
-        return failure(StatusCode::SERVICE_UNAVAILABLE, "session_limit");
-    }
-    let token = match random_token() {
-        Ok(token) => token,
+    let nonce = match random_token() {
+        Ok(nonce) => nonce,
         Err(e) => return error(e),
     };
-    credentials.sessions.insert(
-        token.clone(),
-        Instant::now() + Duration::from_secs(12 * 3600),
-    );
+    let cookie = state.session_cookie_value(unix_seconds() + SESSION_SECONDS, &nonce[..32]);
     let mut response = Json(json!({"ok":true})).into_response();
     response.headers_mut().insert(
         "set-cookie",
-        format!("timeline_session={token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=43200")
-            .parse()
-            .unwrap(),
+        format!(
+            "timeline_session={cookie}; HttpOnly; SameSite=Strict; Path=/; Max-Age={SESSION_SECONDS}"
+        )
+        .parse()
+        .unwrap(),
     );
     response
 }
@@ -437,6 +448,7 @@ fn evidence(
             a.since.as_deref().ok_or_else(invalid)?,
         )?)?,
         "focus_metrics" => serde_json::to_value(queries.focus_metrics(client, selection()?)?)?,
+        "sessions" => serde_json::to_value(queries.sessions(client, selection()?)?)?,
         "commits" => serde_json::to_value(queries.commits(client, selection()?)?)?,
         "repositories" => serde_json::to_value(queries.repositories(a.refresh.unwrap_or(false)))?,
         "activity_bounds" => serde_json::to_value(queries.activity_bounds(client, selection()?)?)?,
@@ -882,38 +894,71 @@ mod tests {
         let web = Web::new(dir.path(), ADDRESS).unwrap();
         let url = web.launch_url().unwrap();
         let token = url.split('#').nth(1).unwrap();
-        web.credentials
+        web.bootstrap
             .lock()
             .unwrap()
-            .bootstrap
             .insert(token.into(), Instant::now() - Duration::from_secs(1));
-        let request = Request::builder()
-            .method("POST")
-            .uri("/bootstrap")
-            .header("host", ADDRESS)
-            .header("origin", format!("http://{ADDRESS}"))
-            .header("content-type", "application/json")
-            .header("x-timeline-request", "1")
-            .body(Body::from(json!({"token":token}).to_string()))
-            .unwrap();
+        let bootstrap = |token: &str| {
+            Request::builder()
+                .method("POST")
+                .uri("/bootstrap")
+                .header("host", ADDRESS)
+                .header("origin", format!("http://{ADDRESS}"))
+                .header("content-type", "application/json")
+                .header("x-timeline-request", "1")
+                .body(Body::from(json!({"token":token}).to_string()))
+                .unwrap()
+        };
         assert_eq!(
-            web.router().oneshot(request).await.unwrap().status(),
+            web.router()
+                .oneshot(bootstrap(token))
+                .await
+                .unwrap()
+                .status(),
             StatusCode::UNAUTHORIZED
         );
-        web.credentials
-            .lock()
+        let status = |web: &Arc<Web>, cookie: &str| {
+            let request = Request::builder()
+                .uri("/api/config")
+                .header("host", ADDRESS)
+                .header("cookie", format!("timeline_session={cookie}"))
+                .body(Body::empty())
+                .unwrap();
+            let router = web.router();
+            async move { router.oneshot(request).await.unwrap().status() }
+        };
+        let now = unix_seconds();
+        let expired = web.session_cookie_value(now - 1, "nonce");
+        assert_eq!(status(&web, &expired).await, StatusCode::UNAUTHORIZED);
+        let too_long = web.session_cookie_value(now + SESSION_SECONDS + 60, "nonce");
+        assert_eq!(status(&web, &too_long).await, StatusCode::UNAUTHORIZED);
+        let current = web.session_cookie_value(now + 60, "nonce");
+        let forged = current.replacen("nonce", "other", 1);
+        assert_eq!(status(&web, &forged).await, StatusCode::UNAUTHORIZED);
+        let other = tempfile::tempdir().unwrap();
+        let stranger = Web::new(other.path(), ADDRESS).unwrap();
+        assert_eq!(
+            status(&web, &stranger.session_cookie_value(now + 60, "nonce")).await,
+            StatusCode::UNAUTHORIZED
+        );
+
+        let url = web.launch_url().unwrap();
+        let response = web
+            .router()
+            .oneshot(bootstrap(url.split('#').nth(1).unwrap()))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let cookie = response.headers()["set-cookie"].to_str().unwrap();
+        let session = cookie
+            .strip_prefix("timeline_session=")
             .unwrap()
-            .sessions
-            .insert("expired".into(), Instant::now() - Duration::from_secs(1));
-        let request = Request::builder()
-            .uri("/api/config")
-            .header("host", ADDRESS)
-            .header("cookie", "timeline_session=expired")
-            .body(Body::empty())
+            .split(';')
+            .next()
             .unwrap();
-        assert_eq!(
-            web.router().oneshot(request).await.unwrap().status(),
-            StatusCode::UNAUTHORIZED
-        );
+        assert_ne!(status(&web, session).await, StatusCode::UNAUTHORIZED);
+        // A restart reads the same http.token, so the session still works.
+        let restarted = Web::new(dir.path(), ADDRESS).unwrap();
+        assert_ne!(status(&restarted, session).await, StatusCode::UNAUTHORIZED);
     }
 }

@@ -197,14 +197,8 @@ export function heatmap(days: DayFocusMetrics[], kind: SwitchKind, timezone: str
 
 const sum = (values: number[]) => values.reduce((total, value) => total + value, 0);
 
-/** Recording gap reasons of a day, longest first, in words. */
-export function gapReasons(day: DayFocusMetrics) {
-  const totals = new Map<string, number>();
-  for (const interval of day.evidence.intervals)
-    if (interval.kind === "gap" && interval.reason)
-      totals.set(interval.reason, (totals.get(interval.reason) ?? 0) + interval.range.end_ms - interval.range.start_ms);
-  return [...totals].sort((a, b) => b[1] - a[1]).map(([reason]) => GAP_REASONS[reason] ?? reason.replaceAll("_", " "));
-}
+/** A recording gap reason in words, such as "paused". */
+export const gapLabel = (reason: string) => GAP_REASONS[reason] ?? reason.replaceAll("_", " ");
 const GAP_REASONS: Record<string, string> = {
   pause: "paused", lock: "locked", disconnect: "desktop disconnected", restart: "recorder restarted",
   startup: "recorder started", suspend: "suspended", clock_discontinuity: "clock change",

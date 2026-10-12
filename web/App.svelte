@@ -1,16 +1,20 @@
 <script lang="ts">
   import { onMount, tick, untrack } from "svelte";
   import DayView from "./DayView.svelte";
+  import Icon from "./Icon.svelte";
   import PeriodView from "./PeriodView.svelte";
-  import RepositoryDetails from "./RepositoryDetails.svelte";
-  import StorageDetails from "./StorageDetails.svelte";
+  import SettingsDrawer from "./SettingsDrawer.svelte";
+  import { query } from "./api";
+  import { categoryNodes, grouping, isNested, type CategoryNode } from "./categories";
   import { activityDate, dateLabel } from "./dates";
   import { createTimelineApp } from "./model";
   import { createPeriodModel } from "./period";
+  import { drawer } from "./drawer";
+  import { colorBy, type ColorBy } from "./preferences";
   import { createRecording } from "./recording";
   import { containsDate, parseRoute, period, periodTitle, routeSearch, sameRoute, shiftPeriod, type Route } from "./routes";
   import { startSession, type Session } from "./session";
-  import type { Range } from "./types";
+  import type { CategoryList, Range } from "./types";
   const app = createTimelineApp();
   const day = app.state;
   const periods = createPeriodModel();
@@ -20,11 +24,14 @@
   let session = $state<Session | null>(null);
   let error = $state("");
   let route = $state<Route>(parseRoute(location.search));
+  let categoryList = $state<CategoryList | null>(null);
   let dayAttached = false;
   const selected = $derived(route.view === "day" ? null : period(route.view, route.date));
   const timezone = $derived(session?.timezone ?? $day.timezone);
   let now = $state(Date.now());
   const today = $derived(activityDate(now, timezone));
+  const nodes = $derived<CategoryNode[]>(categoryList ? categoryNodes(categoryList.categories.map(c => ({ ...c, category: c.name }))) : []);
+  const choice = $derived(grouping($colorBy, nodes));
 
   /** Shows `next`, recording it in browser history unless it came from there. */
   function show(next: Route, mode: "push" | "replace" | "none") {
@@ -48,7 +55,7 @@
         void periods.load(next);
     }
   }
-  /** Drills into a day, optionally marking a range such as an hour or stretch. */
+  /** Drills into a day, optionally marking a range such as a session. */
   async function openDay(date: string, range?: Range) {
     if (!session) return;
     history.pushState(null, "", routeSearch({ view: "day", date }));
@@ -79,6 +86,11 @@
     event.preventDefault();
     if (target.view !== route.view) { show(target, "push"); window.scrollTo({ top: 0 }); }
   }
+  const colorChoices = $derived<{ value: ColorBy; label: string }[]>([
+    { value: "category", label: "Category" },
+    ...(isNested(nodes) ? [{ value: "subcategory" as const, label: "Subcategory" }] : []),
+    { value: "application", label: "App" },
+  ]);
   // The day view's date follows its navigation; record it so a reload returns there.
   $effect(() => {
     const date = $day.date;
@@ -86,8 +98,8 @@
   });
   $effect(() => {
     document.title = (selected ? periodTitle(selected)
-      : $day.date ? dateLabel($day.date, { weekday: "short", day: "numeric", month: "short", year: "numeric" }) : "Desktop timeline")
-      + (selected || $day.date ? " · Desktop timeline" : "");
+      : $day.date ? dateLabel($day.date, { weekday: "short", day: "numeric", month: "short" }) : "Timeline")
+      + (selected || $day.date ? " · Timeline" : "");
   });
   onMount(() => {
     const lifetime = new AbortController();
@@ -101,6 +113,7 @@
       periods.start(started);
       apply();
       void recording.start();
+      query<CategoryList>("categories", {}, lifetime.signal).then(list => categoryList = list).catch(() => {});
     }).catch(failure => {
       if (!lifetime.signal.aborted) error = failure instanceof Error ? failure.message : String(failure);
     });
@@ -109,29 +122,105 @@
       app.dispose(); periods.dispose(); recording.dispose();
     };
   });
+  const message = $derived(error || $status.error || (route.view === "day" ? $day.message : $periodState.message));
 </script>
 
-<main>
-  <header class="app-header">
-    <div><span class="eyebrow">DESKTOP ACTIVITY</span><h1>Your activity, recalled.</h1></div>
-    <nav class="view-switch" aria-label="View">
+<div class="shell" class:fill={route.view === "day"}>
+  <header class="topbar">
+    <a class="brand" href="/" onclick={event => follow(event, { view: "day", date: today })} aria-label="Timeline, today">
+      <svg width="22" height="22" viewBox="0 0 24 24" aria-hidden="true">
+        <rect x="2" y="5" width="7" height="4" rx="2" fill="var(--series-1)" />
+        <rect x="10.5" y="10" width="11.5" height="4" rx="2" fill="var(--series-3)" />
+        <rect x="5" y="15" width="9" height="4" rx="2" fill="var(--series-7)" />
+      </svg>
+      <span>Timeline</span>
+    </a>
+    <nav class="segmented views" aria-label="View">
       {#each views as entry (entry.label)}
         <a href={routeSearch(entry.route)} aria-current={entry.route.view === route.view ? "page" : undefined}
           onclick={event => follow(event, entry.route)}>{entry.label}</a>
       {/each}
     </nav>
-    <section class="status" aria-label="Recording">
-      <span id="recording">{$status.label}</span>
-      <button id="pause" disabled={$status.busy} onclick={() => void recording.toggle()}>{$status.paused ? "Resume recording" : "Pause recording"}</button>
-    </section>
+    <div class="spacer"></div>
+    {#if nodes.length}
+      <div class="color-by" role="group" aria-label="Color by">
+        <span class="label">Color by</span>
+        <div class="segmented">
+          {#each colorChoices as option (option.value)}
+            <button aria-pressed={choice === option.value} onclick={() => colorBy.set(option.value)}>{option.label}</button>
+          {/each}
+        </div>
+      </div>
+    {/if}
+    <div class="recording" class:paused={$status.paused} class:off={$status.busy && !$status.paused}>
+      <span class="pulse" aria-hidden="true"></span>
+      <span id="recording" class="recording-label">{$status.label}</span>
+      <button id="pause" class="btn small ghost" disabled={$status.busy} onclick={() => void recording.toggle()}
+        aria-label={$status.paused ? "Resume recording" : "Pause recording"} title={$status.paused ? "Resume recording" : "Pause recording"}>
+        <Icon name={$status.paused ? "play" : "pause"} size={14} />{$status.paused ? "Resume" : "Pause"}
+      </button>
+    </div>
+    <button class="btn icon ghost" aria-label="Settings and details" title="Settings and details" onclick={() => drawer.set("categories")}>
+      <Icon name="settings" />
+    </button>
   </header>
-  <p id="message" role="status">{error || $status.error || (route.view === "day" ? $day.message : $periodState.message)}</p>
-  {#if route.view === "day"}
-    <DayView {app} />
-  {:else if selected}
-    <PeriodView model={periods} period={selected} {today} onperiod={changePeriod} onopen={(date, range) => void openDay(date, range)} />
+
+  {#if message}
+    <div id="message" class="message" role="status"><Icon name="info" size={14} />{message}</div>
+  {:else}
+    <div id="message" class="visually-hidden" role="status"></div>
   {/if}
-  <RepositoryDetails settingsPath={session?.settingsPath ?? null} {timezone} />
-  <StorageDetails />
-  <footer>Activity days begin at 04:00; weeks begin on Monday. Closing this page leaves recording running.</footer>
-</main>
+
+  <main>
+    {#if route.view === "day"}
+      <DayView {app} {nodes} {choice} {today} />
+    {:else if selected}
+      <PeriodView model={periods} period={selected} {today} {choice} onperiod={changePeriod} onopen={(date, range) => void openDay(date, range)} />
+    {/if}
+  </main>
+</div>
+
+<SettingsDrawer {categoryList} settingsPath={session?.settingsPath ?? null} {timezone} />
+
+<style>
+  .shell { min-height: 100vh; display: flex; flex-direction: column; }
+  /* The day view fits the viewport exactly; week and month scroll as pages. */
+  .shell.fill { height: 100dvh; min-height: 640px; }
+  .shell.fill main { display: flex; flex-direction: column; min-height: 0; }
+  @media (max-width: 1180px) { .shell.fill { height: auto; } }
+  .topbar {
+    position: sticky; top: 0; z-index: 20; display: flex; align-items: center; gap: 16px;
+    height: 56px; padding: 0 20px; background: color-mix(in oklab, var(--bg), transparent 15%);
+    backdrop-filter: blur(12px); border-bottom: 1px solid var(--border);
+  }
+  .brand { display: flex; align-items: center; gap: 9px; color: var(--text); text-decoration: none; font-weight: 650; font-size: 15px; letter-spacing: -0.01em; }
+  .spacer { flex: 1; }
+  .color-by { display: flex; align-items: center; gap: 8px; }
+  .color-by .label { font-size: 12px; color: var(--muted); }
+  .recording {
+    display: flex; align-items: center; gap: 8px; height: 32px; padding: 0 4px 0 12px;
+    border-radius: 999px; border: 1px solid var(--border); background: var(--surface);
+  }
+  .recording-label { font-size: 12.5px; color: var(--text-2); white-space: nowrap; }
+  .pulse { position: relative; width: 8px; height: 8px; border-radius: 50%; background: var(--good); }
+  .pulse::after {
+    content: ""; position: absolute; inset: -4px; border-radius: 50%; border: 2px solid var(--good);
+    opacity: 0; animation: ping 2.4s ease-out infinite;
+  }
+  .paused .pulse { background: var(--warn); }
+  .paused .pulse::after, .off .pulse::after { display: none; }
+  .off .pulse { background: var(--faint); }
+  @keyframes ping { 0% { transform: scale(0.6); opacity: 0.7; } 80%, 100% { transform: scale(1.4); opacity: 0; } }
+  .message {
+    display: flex; align-items: center; gap: 8px; margin: 12px 20px 0; padding: 8px 12px;
+    border-radius: var(--radius-sm); background: var(--surface-2); border: 1px solid var(--border);
+    color: var(--text-2); font-size: 13px;
+  }
+  main { flex: 1; padding: 20px; width: 100%; max-width: 1760px; margin: 0 auto; }
+  @media (max-width: 900px) {
+    .topbar { gap: 10px; padding: 0 12px; flex-wrap: wrap; height: auto; padding-block: 8px; }
+    .color-by .label, .recording-label { display: none; }
+    .brand span { display: none; }
+    main { padding: 12px; }
+  }
+</style>

@@ -1,26 +1,25 @@
 <script lang="ts">
-  import ColorBy from "./ColorBy.svelte";
-  import DailyFocusChart from "./DailyFocusChart.svelte";
-  import HourHeatmap from "./HourHeatmap.svelte";
-  import StatTile from "./StatTile.svelte";
-  import SubjectComparison from "./SubjectComparison.svelte";
-  import TrendChart from "./TrendChart.svelte";
-  import { categoryGrouping, categoryLabel, categorySwatches, grouping, isNested } from "./categories";
-  import { commitCount, commitDays, commitProblems } from "./commits";
-  import { dateSpan, shortDate } from "./dates";
-  import { applicationSwatch, clock, clockRange, duration, swatchStyle, type Swatch } from "./format";
+  import Icon from "./Icon.svelte";
+  import MonthCalendar from "./MonthCalendar.svelte";
+  import Patterns from "./Patterns.svelte";
+  import Rhythm from "./Rhythm.svelte";
+  import SubjectChanges from "./SubjectChanges.svelte";
+  import WeekCalendar from "./WeekCalendar.svelte";
+  import { commitDays, commitProblems } from "./commits";
+  import { dateLabel, dateSpan, openPicker, shortDate } from "./dates";
+  import { clock, duration } from "./format";
   import { plural } from "./metrics";
+  import { painter } from "./paint";
   import type { PeriodModel } from "./period";
-  import { colorBy } from "./preferences";
-  import { comparisonName, containsDate, periodTitle, samePoint, type Period } from "./routes";
-  import { compareSubjects, durationDelta, gapReasons, heatmap, longShare, rateDelta, subjects, summarize,
-    switchRate, trendSeries, type Delta, type PeriodSummary, type Subject } from "./trends";
-  import type { FocusSubject, Range } from "./types";
-  let { model, period, today, onperiod, onopen }: {
-    model: PeriodModel; period: Period; today: string;
+  import type { ColorBy } from "./preferences";
+  import { comparisonName, containsDate, samePoint, type Period } from "./routes";
+  import { durationDelta, longShare, rateDelta, summarize, switchRate, type Delta, type PeriodSummary } from "./trends";
+  import type { Range } from "./types";
+  let { model, period, today, choice, onperiod, onopen }: {
+    model: PeriodModel; period: Period; today: string; choice: ColorBy;
     /** Selects another period of the same kind; `null` for the one containing today. */
     onperiod: (date: string | null, delta?: number) => void;
-    /** Opens the day view, optionally marking a range such as an hour or stretch. */
+    /** Opens the day view, optionally marking a range such as a session. */
     onopen: (date: string, range?: Range) => void;
   } = $props();
   const view = $derived(model.state);
@@ -29,189 +28,159 @@
   const shown = $derived($view.period ?? period);
   const now = $derived($view.now);
   const timezone = $derived($view.timezone);
-  const configured = $derived($view.categories.length > 0);
-  const choice = $derived(grouping($colorBy, $view.categories));
-  const mode = $derived(choice === "application" ? "application" : "category");
-  /** Categories as shown: rolled up to the top level, or in full detail. */
-  const shownCategories = $derived(categoryGrouping($view.categories, choice === "subcategory" ? "subcategory" : "category"));
-  const groupNoun = $derived(choice === "subcategory" ? "subcategory" : mode);
-  const noun = $derived(shown.kind);
-  const name = $derived(comparisonName(shown));
+  const paint = $derived(painter(choice, $view.categories));
   const comparison = $derived($view.comparison);
   const current = $derived(data ? summarize(data.days, now) : null);
   const previous = $derived(comparison ? summarize(comparison.data.days, now) : null);
-  /** A comparison is meaningful only if the comparison period has any evidence. */
   const comparable = $derived(!!previous && previous.observed_ms > 0);
-  const dates = $derived(data?.days.map(day => day.date) ?? []);
-  // Commits of the loaded period only; a period still loading shows none.
+  const name = $derived(comparisonName(shown));
+  const kind = $derived(shown.kind);
+  const inProgress = $derived(containsDate(shown, today));
   const commitList = $derived($view.commits && $view.commits.resolved.range.start_ms === data?.resolved.range.start_ms ? $view.commits : null);
   const commits = $derived(commitList ? commitDays(commitList) : undefined);
-  const commitNote = $derived($view.commitError ? `Commits unavailable: ${$view.commitError}.`
-    : commitProblems(commitList) ? `Commits may be missing: ${commitProblems(commitList)}.` : "");
+  const commitNote = $derived($view.commitError ? `Commits unavailable: ${$view.commitError}` : commitProblems(commitList));
 
-  const categoryColor = $derived(categorySwatches($view.categories));
-  const swatch = (subject: Subject): Swatch => subject.category !== undefined
-    ? categoryColor(subject.category)
-    : subject.application !== undefined ? applicationSwatch(subject.application)
-    : { fill: "var(--uncategorized)", ink: "var(--uncategorized-ink)" };
-  const subjectSwatch = (subject: FocusSubject) => subject.kind === "category"
-    ? categoryColor(subject.name) : applicationSwatch(subject.name);
-  const stack = $derived(data ? subjects(data.days, mode, shownCategories) : []);
-  const changes = $derived(data ? compareSubjects(data.days, comparison?.data.days ?? null, mode, shownCategories) : []);
-  const series = $derived(data ? trendSeries(data.days, mode) : null);
-  // Days that have not begun have no hours to show.
-  const cells = $derived(data ? heatmap(data.days.filter(day => day.range.start_ms < now), mode, timezone, now) : []);
-
-  /** The tile's change, or why there is none. */
-  function change(make: (current: PeriodSummary, previous: PeriodSummary) => Delta | undefined): Delta | string | undefined {
-    if ($view.comparing && !comparison) return "Comparing…";
+  function change(make: (c: PeriodSummary, p: PeriodSummary) => Delta | undefined): Delta | string | undefined {
+    if ($view.comparing && !comparison) return "…";
     if (!previous || !current) return undefined;
-    if (!comparable) return `No evidence ${name}`;
+    if (!comparable) return "no comparison";
     return make(current, previous);
   }
   const label = $derived(`vs ${name}`);
-  const rate = (summary: PeriodSummary) => switchRate(summary, "application");
-  function evidence(summary: PeriodSummary) {
-    const recorded = summary.elapsed_days - summary.missing.length;
-    return `${recorded} of ${plural(summary.elapsed_days, "day")} with evidence`
-      + (summary.missing.length ? ` (none on ${summary.missing.map(shortDate).join(", ")})` : "");
-  }
-  const caveat = $derived(!!current?.missing.length || (comparable && !!previous?.missing.length));
-
-  const niceMax = (value: number, steps: number[]) => steps.find(step => value <= step) ?? steps.at(-1)!;
-  const rateMax = $derived(niceMax(Math.max(0, ...(series?.rate ?? []).map(value => value ?? 0)), [5, 10, 20, 30, 40, 60, 80, 100, 150, 200, 400]));
-  const longestMax = $derived(niceMax(Math.max(0, ...(series?.longest ?? []).map(value => value ?? 0)) / 60_000, [30, 60, 90, 120, 180, 240, 360, 480, 720, 1440]) * 60_000);
-  const switchTitle = $derived(`${mode === "category" ? "Category" : "Application"} switches per active hour`);
-  const percent = (value: number | null) => value === null ? "—" : `${value.toFixed(0)}%`;
-  const kindName = $derived(noun === "week" ? "week" : "month");
+  const deep = (s: PeriodSummary) => longShare(s);
+  const deepDelta = (c: PeriodSummary, p: PeriodSummary): Delta | undefined => {
+    const a = deep(c), b = deep(p);
+    if (a === null || b === null) return undefined;
+    const difference = Math.round(a) - Math.round(b);
+    return { text: difference === 0 ? "No change" : `${difference > 0 ? "+" : "−"}${Math.abs(difference)} pts`, direction: Math.sign(difference) as Delta["direction"], label };
+  };
+  const tiles = $derived(current ? [
+    { id: "period-focus", label: "Focus", value: duration(current.focus_ms) || "0 min",
+      caption: `${duration(current.active_ms) || "0 min"} active`, delta: change((c, p) => durationDelta(c.focus_ms, p.focus_ms, label)) },
+    { id: "period-switches", label: "Switches", value: String(switchRate(current, paint.mode) ?? "—"), unit: "/h",
+      caption: paint.mode === "category" ? "between categories" : "between apps", delta: change((c, p) => rateDelta(switchRate(c, paint.mode), switchRate(p, paint.mode), label)) },
+    { id: "period-deep", label: "Deep focus", value: deep(current) === null ? "—" : deep(current)!.toFixed(0), unit: "%",
+      caption: `${duration(current.long_ms) || "0 min"} in stretches ≥ 25 min`, delta: change(deepDelta) },
+  ] : []);
+  const evidenceNote = $derived(current?.missing.length ? `No recording on ${current.missing.map(shortDate).join(", ")}` : "");
   const changeDate = (event: Event) => { const value = (event.currentTarget as HTMLInputElement).value; if (value) onperiod(value); };
+  const weekNumber = (date: string) => {
+    const d = new Date(date + "T12:00:00Z");
+    d.setUTCDate(d.getUTCDate() + 3 - (d.getUTCDay() + 6) % 7);
+    const first = new Date(Date.UTC(d.getUTCFullYear(), 0, 4));
+    return 1 + Math.round(((d.getTime() - first.getTime()) / 86_400_000 - 3 + (first.getUTCDay() + 6) % 7) / 7);
+  };
+  const heading = $derived(kind === "week" ? `Week ${weekNumber(shown.first)}` : dateLabel(shown.first, { month: "long", year: "numeric" }));
+  const subheading = $derived(kind === "week" ? dateSpan(shown.first, shown.last) : `${shown.length} days`);
 </script>
 
-<section class="panel period-panel" aria-labelledby="period-heading" aria-busy={$view.loading}>
-  <nav class="timeline-navigation" aria-label="Period navigation">
-    <div class="navigation-row">
-      <div class="control-group date-controls">
-        <button id="period-previous" aria-label={`Previous ${kindName}`} onclick={() => onperiod(period.first, -1)}>‹</button>
-        <label class="date-label">{noun === "week" ? "Week of" : "Month of"}
-          <input type="date" id="period-date" aria-label={`Go to the ${kindName} containing a date`} value={period.first} onchange={changeDate} />
+{#snippet deltaBadge(delta: Delta | string | undefined)}
+  {#if typeof delta === "string"}<span class="delta none">{delta}</span>
+  {:else if delta}<span class="delta" class:up={delta.direction > 0} class:down={delta.direction < 0} title={delta.label}>
+    {delta.direction > 0 ? "↑" : delta.direction < 0 ? "↓" : ""} {delta.text.replace(/^[+−]/, "")}</span>{/if}
+{/snippet}
+
+<div class="period" aria-busy={$view.loading}>
+  <header class="head">
+    <div class="title-block">
+      <div class="date-nav">
+        <button id="period-previous" class="btn icon ghost" aria-label={`Previous ${kind}`} onclick={() => onperiod(period.first, -1)}><Icon name="chevron-left" /></button>
+        <label class="date-picker">
+          <h1 id="period-heading">{heading}</h1>
+          <Icon name="chevron-down" size={14} />
+          <input type="date" id="period-date" onclick={openPicker} aria-label={`Go to the ${kind} containing a date`} value={period.first} onchange={changeDate} />
         </label>
-        <button id="period-next" aria-label={`Next ${kindName}`} onclick={() => onperiod(period.first, 1)}>›</button>
+        <button id="period-next" class="btn icon ghost" aria-label={`Next ${kind}`} onclick={() => onperiod(period.first, 1)}><Icon name="chevron-right" /></button>
+        {#if !containsDate(period, today)}<button id="period-current" class="btn small" onclick={() => onperiod(null)}>This {kind}</button>{/if}
       </div>
-      <button id="period-current" class="primary-action" disabled={containsDate(period, today)} onclick={() => onperiod(null)}>This {kindName}</button>
-      {#if configured}<span class="navigation-end"><ColorBy nested={isNested($view.categories)} /></span>{/if}
+      <p class="subtitle muted">{subheading}{#if comparison}{` · compared with ${dateSpan(comparison.first, comparison.last)}`}{#if comparison.partial}{` until ${clock(comparison.range.end_ms, timezone)}`}{/if}{/if}</p>
     </div>
-  </nav>
-  <div class="period-heading" class:stale={$view.loading}>
-    <h2 id="period-heading">{periodTitle(shown)}</h2>
-    <p class="muted">
-      {noun === "month" ? dateSpan(shown.first, shown.last) + " · " : ""}Activity days begin at 04:00{#if comparison}
-        {` · compared with ${dateSpan(comparison.first, comparison.last)}`}{#if comparison.partial}{` until ${clock(comparison.range.end_ms, timezone)}, ${samePoint(shown)}`}{/if}{/if}
+    <dl class="kpis" id="period-totals" class:loading={$view.loading}>
+      {#each tiles as tile (tile.id)}
+        <div class="kpi" id={tile.id}>
+          <dt>{tile.label}</dt>
+          <dd class="num">{tile.value}{#if tile.unit}<small>{tile.unit}</small>{/if}{@render deltaBadge(tile.delta)}</dd>
+          <span class="caption ellipsis">{tile.caption}</span>
+        </div>
+      {/each}
+      {#if current}
+        <div class="kpi" id="period-longest">
+          <dt>Longest stretch</dt>
+          <dd class="num">{current.longest ? duration(current.longest.stretch.elapsed_ms) : "—"}</dd>
+          {#if current.longest}
+            {@const longest = current.longest}
+            <button class="caption link" onclick={() => onopen(longest.date, longest.stretch.range)}>
+              {longest.stretch.subject.kind === "category" ? paint.category(longest.stretch.subject.name).label : longest.stretch.subject.name} · {shortDate(longest.date)}</button>
+          {:else}<span class="caption">&nbsp;</span>{/if}
+        </div>
+        {#if commitList}
+          <div class="kpi" id="period-commits">
+            <dt>Commits</dt>
+            <dd class="num">{commitList.commits.length}</dd>
+            <span class="caption">{plural(commitList.repositories, "repository", "repositories")}</span>
+          </div>
+        {/if}
+      {/if}
+    </dl>
+  </header>
+
+  {#if evidenceNote || commitNote || (comparison && comparable && previous?.missing.length)}
+    <p class="note" id="period-evidence">
+      <Icon name="info" size={14} />
+      <span>{[evidenceNote, comparable && previous?.missing.length ? `${name[0].toUpperCase() + name.slice(1)} has days without recording, so changes partly reflect missing data` : "", commitNote].filter(Boolean).join(" · ")}</span>
     </p>
-  </div>
+  {/if}
 
   {#if data && current}
-    <div class="period-content" class:stale={$view.loading}>
-      <dl class="stat-tiles" id="period-totals">
-        <StatTile id="period-focus" label="Recorded focus" delta={change((c, p) => durationDelta(c.focus_ms, p.focus_ms, label))}>
-          {duration(current.focus_ms)}
-          {#snippet detail()}{duration(current.idle_ms)} idle · {duration(current.active_ms)} active{/snippet}
-        </StatTile>
-        <StatTile id="period-switches" label="Context switches" delta={change((c, p) => rateDelta(rate(c), rate(p), label))}>
-          {rate(current) ?? "—"}{" "}<small>per active hour</small>
-          {#snippet detail()}{plural(current.switches.application, "application switch", "application switches")}{#if current.switches.category !== null}{` · ${switchRate(current, "category") ?? "—"}/h between categories`}{/if}{/snippet}
-        </StatTile>
-        <StatTile id="period-longest" label="Longest focus stretch" action={current.longest ? showLongest : undefined}>
-          {current.longest ? duration(current.longest.stretch.elapsed_ms) : "—"}
-          {#snippet detail()}
-            {#if current.longest}
-              <span class="category-tag"><span class="swatch" style={swatchStyle(subjectSwatch(current.longest.stretch.subject))}></span>{current.longest.stretch.subject.kind === "category" ? categoryLabel($view.categories, current.longest.stretch.subject.name) : current.longest.stretch.subject.name}</span>
-              {` · ${shortDate(current.longest.date)}, ${clockRange(current.longest.stretch.range, timezone)}`}
-            {:else}No active focus{/if}
-          {/snippet}
-        </StatTile>
-        <StatTile id="period-long" label="In long stretches" delta={change((c, p) => durationDelta(c.long_ms, p.long_ms, label))}>
-          {duration(current.long_ms) || "0 min"}
-          {#snippet detail()}{percent(longShare(current))} of active focus, in {plural(current.long_count, "stretch", "stretches")} of 25 min or more{/snippet}
-        </StatTile>
-      </dl>
-      <p class="evidence-note" id="period-evidence" class:caveat>
-        <span>This {kindName}{comparison?.partial || containsDate(shown, today) ? " so far" : ""}: {evidence(current)}.</span>
-        {#if previous}<span>{name[0].toUpperCase() + name.slice(1)}: {comparable ? evidence(previous) : "no evidence"}.</span>{/if}
-        {#if caveat && comparable}<span>Changes partly reflect missing evidence.</span>{/if}
-      </p>
-
-      <section class="period-section" aria-labelledby="daily-heading">
-        <h3 id="daily-heading">Focus by day <span class="muted">· active focus by {groupNoun}, idle on top</span></h3>
-        <DailyFocusChart days={data.days} subjects={stack} {swatch} {now} {commits} onopen={date => onopen(date)}
-          onshift={delta => onperiod(period.first, delta)} onhome={() => onperiod(null)} />
-        {#if commitList}
-          <p class="muted commit-note" id="period-commits">{commitCount(commitList.commits.length)} this {kindName} in your repositories{commitNote ? ` · ${commitNote}` : "."}</p>
-        {:else if commitNote}<p class="muted commit-note" id="period-commits">{commitNote}</p>{/if}
-        <details class="breakdown-details">
-          <summary>Daily totals table</summary>
-          <div class="table-scroll">
-            <table class="data-table" id="daily-table">
-              <thead><tr><th scope="col">Day</th>{#each stack as subject (subject.key)}<th scope="col">{subject.name}</th>{/each}
-                <th scope="col">Idle</th><th scope="col">Recorded focus</th><th scope="col">Evidence</th><th scope="col">Gaps</th><th scope="col">Unknown</th>{#if commits}<th scope="col">Commits</th>{/if}</tr></thead>
-              <tbody>
-                {#each data.days as day, index (day.date)}
-                  <tr><th scope="row">{shortDate(day.date)}</th>
-                    {#each stack as subject (subject.key)}<td>{duration(subject.days[index])}</td>{/each}
-                    <td>{duration(day.totals.focus_ms - day.metrics.active_ms)}</td><td>{duration(day.totals.focus_ms)}</td>
-                    <td>{day.range.start_ms >= now ? "—" : duration(day.evidence.observed_ms)}</td>
-                    <td>{duration(day.evidence.gap_ms)}{gapReasons(day).length ? ` (${gapReasons(day).join(", ")})` : ""}</td>
-                    <td>{duration(day.evidence.unknown_ms)}</td>{#if commits}<td>{commits.get(day.date)?.count ?? 0}</td>{/if}</tr>
-                {/each}
-              </tbody>
-            </table>
-          </div>
-        </details>
-      </section>
-
-      <div class="period-columns">
-        <SubjectComparison rows={changes} {swatch} heading={choice === "subcategory" ? "Subcategories" : mode === "category" ? "Categories" : "Applications"}
-          current={`This ${kindName}`} previous={name} comparing={$view.comparing} missing={!!previous && !comparable} />
-        {#if series}
-          <section class="period-section trends" aria-labelledby="trends-heading">
-            <h3 id="trends-heading">Focus patterns <span class="muted">· by day</span></h3>
-            <TrendChart id="trend-switches" title={switchTitle} summary={`${switchRate(current, mode) ?? "—"}/h overall`} {dates}
-              values={series.rate} max={rateMax} ticks={[0, rateMax / 2, rateMax]} format={value => `${Math.round(value * 10) / 10}`} onopen={date => onopen(date)} />
-            <TrendChart id="trend-longest" title="Longest focus stretch" summary={current.longest ? `${duration(current.longest.stretch.elapsed_ms)} at most` : "—"} {dates}
-              values={series.longest} max={longestMax} ticks={[0, longestMax / 2, longestMax]} format={duration} onopen={date => onopen(date)} />
-            <TrendChart id="trend-long-share" title="Share in long stretches" summary={`${percent(longShare(current))} overall`} {dates}
-              values={series.longShare} max={100} ticks={[0, 50, 100]} format={value => `${value.toFixed(0)}%`} onopen={date => onopen(date)} />
-            <details class="breakdown-details">
-              <summary>Focus patterns table</summary>
-              <div class="table-scroll">
-                <table class="data-table" id="trend-table">
-                  <thead><tr><th scope="col">Day</th><th scope="col">Active focus</th><th scope="col">{switchTitle}</th>
-                    <th scope="col">Longest stretch</th><th scope="col">In long stretches</th></tr></thead>
-                  <tbody>
-                    {#each data.days as day, index (day.date)}
-                      <tr><th scope="row">{shortDate(day.date)}</th><td>{duration(day.metrics.active_ms)}</td><td>{series.rate[index] ?? "—"}</td>
-                        <td>{series.longest[index] === null ? "—" : duration(series.longest[index]!)}</td><td>{percent(series.longShare[index])}</td></tr>
-                    {/each}
-                  </tbody>
-                </table>
-              </div>
-            </details>
-          </section>
+    <div class="layout" class:stale={$view.loading}>
+      <div class="main">
+        {#if kind === "week"}
+          <WeekCalendar days={data.days} {paint} {timezone} {now} {today} {commits} {onopen} />
+        {:else}
+          <MonthCalendar days={data.days} {paint} {now} {today} {commits} {onopen} />
+          <Rhythm days={data.days} {timezone} {now} />
         {/if}
       </div>
-
-      <section class="period-section" aria-labelledby="heatmap-heading">
-        <HourHeatmap rows={cells} kind={mode} {timezone} onopen={(date, range) => onopen(date, range)} />
-      </section>
-
-      <p class="muted breakdown-note">Bars stack active focus (focus outside idle periods) by {groupNoun}, with idle focus on top; together
-        they are recorded focus. Hatched days and hours have no evidence: the recorder was paused, locked, stopped or not yet running,
-        which is not the same as no activity. Changes compare the same number of activity days immediately before{#if comparison?.partial}, up
-        to the same day and time{/if}. Weeks start on Monday. Context switches and focus stretches are defined as in the day view.
-        This is observed activity: not time assigned to tasks, and not a measure of productivity.</p>
+      <aside class="side">
+        <SubjectChanges days={data.days} previous={comparable ? comparison!.data.days : null} {paint} comparing={$view.comparing}
+          current={inProgress ? `This ${kind} so far` : `This ${kind}`} {name} />
+        <Patterns days={data.days} {paint} {now} {onopen} />
+      </aside>
     </div>
-  {:else if $view.loading}<p class="muted">Loading {kindName}…</p>{/if}
-</section>
+  {:else if $view.loading}
+    <div class="loading"><span class="spinner"></span>Loading {kind}…</div>
+  {/if}
+  <p class="foot muted">Changes compare with the {name}{inProgress ? `, up to ${samePoint(shown)}` : ""}. Ticks mark the {name}; arrows are changes, not judgements.</p>
+</div>
 
-{#snippet showLongest()}
-  <button class="link-button" onclick={() => current?.longest && onopen(current.longest.date, current.longest.stretch.range)}>Show in day view</button>
-{/snippet}
+<style>
+  .period { display: flex; flex-direction: column; gap: 16px; }
+  .head { display: flex; align-items: flex-end; justify-content: space-between; gap: 24px; flex-wrap: wrap; }
+  .title-block { display: flex; flex-direction: column; gap: 2px; }
+  .date-nav { display: flex; align-items: center; gap: 4px; margin-left: -8px; }
+  .date-picker { position: relative; display: flex; align-items: center; gap: 6px; padding: 2px 8px; border-radius: 8px; cursor: pointer; color: var(--muted); }
+  .date-picker:hover { background: var(--surface-2); }
+  .date-picker:focus-within { outline: 2px solid var(--accent); }
+  .date-picker h1 { font-size: 24px; font-weight: 650; letter-spacing: -0.02em; color: var(--text); white-space: nowrap; }
+  .date-picker input { position: absolute; inset: 0; opacity: 0; cursor: pointer; width: 100%; }
+  .date-picker input::-webkit-calendar-picker-indicator { position: absolute; inset: 0; width: 100%; height: 100%; cursor: pointer; }
+  .subtitle { font-size: 13px; padding-left: 2px; }
+  .kpis { display: flex; gap: 8px; flex-wrap: wrap; }
+  .kpi { display: flex; flex-direction: column; min-width: 140px; padding: 10px 14px; border-radius: var(--radius); background: var(--surface); border: 1px solid var(--border); }
+  .kpis.loading .kpi { opacity: 0.6; }
+  dt { font-size: 11.5px; color: var(--muted); font-weight: 500; }
+  dd { font-size: 22px; font-weight: 650; letter-spacing: -0.02em; line-height: 1.25; }
+  dd small { font-size: 13px; color: var(--muted); font-weight: 500; margin-left: 1px; }
+  .caption { display: block; font-size: 11.5px; color: var(--muted); white-space: nowrap; max-width: 220px; text-align: left; }
+  .caption.link { color: var(--accent-strong); overflow: hidden; text-overflow: ellipsis; display: block; }
+  .delta { margin-left: 8px; font-size: 12px; font-weight: 600; letter-spacing: 0; color: var(--text-2); vertical-align: 2px; }
+  .delta.none { font-weight: 500; color: var(--faint); }
+  .note { display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--text-2); padding: 8px 12px; border-radius: var(--radius-sm); background: var(--surface); border: 1px solid var(--border); }
+  .layout { display: grid; grid-template-columns: minmax(0, 1fr) 360px; gap: 16px; align-items: start; transition: opacity 0.2s; }
+  .layout.stale { opacity: 0.6; }
+  .main, .side { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+  .loading { display: flex; align-items: center; gap: 10px; color: var(--muted); padding: 40px; justify-content: center; }
+  .foot { font-size: 12px; }
+  @media (max-width: 1180px) { .layout { grid-template-columns: 1fr; } }
+  @media (max-width: 700px) { .kpi { min-width: calc(50% - 4px); flex: 1; } .date-picker h1 { font-size: 19px; } }
+</style>

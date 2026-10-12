@@ -93,6 +93,9 @@ export function createTimelineApp() {
     return zoom === "fit" ? view.fitWidth! : zoomLevels.find(level => level.value === zoom)?.durationMs
       ?? (day.end_ms - day.start_ms) / Number(zoom);
   }
+  /** Recorded activity with a margin, within the day and at least a minute. */
+  const fittedWidth = (day: Range, activity: Range) =>
+    Math.min(day.end_ms - day.start_ms, Math.max(60_000, Math.ceil((activity.end_ms - activity.start_ms) * 1.1)));
   function setVisible(center: number, anchor = 0.5, bounded = false) {
     if (!view.day) return;
     const width = windowWidth(view.day);
@@ -241,9 +244,23 @@ export function createTimelineApp() {
         if (resolvedDays.size > 32) resolvedDays.delete(resolvedDays.keys().next().value!);
       }
       const day = resolved.range;
-      const zoom = center === undefined ? "1" : view.zoom;
-      const width = windowWidth(day, zoom);
-      const start = Math.round((center ?? (day.start_ms + day.end_ms) / 2) - width / 2);
+      let zoom = center === undefined ? "1" : view.zoom;
+      let fitWidth = center === undefined ? undefined : view.fitWidth;
+      let middle = center ?? (day.start_ms + day.end_ms) / 2;
+      // A chosen date opens on its recorded activity, so one scan covers what is shown.
+      if (center === undefined) {
+        // Without bounds the day opens whole; they only frame it.
+        const bounds = await query<{ activity?: Range | null }>("activity_bounds", { date }, signal)
+          .catch(error => { signal.throwIfAborted(); void error; return null; });
+        signal.throwIfAborted();
+        if (bounds?.activity) {
+          zoom = "fit";
+          fitWidth = fittedWidth(day, bounds.activity);
+          middle = (bounds.activity.start_ms + bounds.activity.end_ms) / 2;
+        }
+      }
+      const width = zoom === "fit" ? fitWidth! : windowWidth(day, zoom);
+      const start = Math.round(middle - width / 2);
       const range = { start_ms: start, end_ms: start + width };
       // Resolve boundaries without scanning a full day whose overview would be
       // discarded whenever the dragged range straddles two activity days.
@@ -251,8 +268,7 @@ export function createTimelineApp() {
       if (generation !== rangeGeneration) return;
       loadedDate = date;
       publishRows(raw, overview, overview.revision, range, { ...commits,
-        day, timezone: resolved.timezone, visible: range, zoom, dayLoading: false,
-        ...(center === undefined ? { fitWidth: undefined } : {}),
+        day, timezone: resolved.timezone, visible: range, zoom, fitWidth, dayLoading: false,
         ...(view.frames === null ? { selected: selected ?? range.start_ms } : {}),
       });
       if (selected !== undefined && view.date === date && intent === interactionGeneration) await select(selected);
@@ -426,8 +442,7 @@ export function createTimelineApp() {
       signal.throwIfAborted();
       if (!result.activity) { patch({ message: "No recorded activity on this day." }); return; }
       const range = result.activity;
-      const width = Math.min(view.day!.end_ms - view.day!.start_ms, Math.max(60_000, Math.ceil((range.end_ms - range.start_ms) * 1.1)));
-      patch({ zoom: "fit", fitWidth: width });
+      patch({ zoom: "fit", fitWidth: fittedWidth(view.day!, range) });
       setVisible((range.start_ms + range.end_ms) / 2);
       await loadRange();
     } catch (error) { failure(error); }

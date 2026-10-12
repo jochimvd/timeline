@@ -36,10 +36,6 @@ export function byRepository(commits: Commit[]): [string, number][] {
   return [...counts].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
 }
 
-/** "timeline 2, site 1": who a day's or marker's commits went to. */
-export const repositorySummary = (commits: Commit[]) =>
-  byRepository(commits).map(([name, count]) => `${repositoryLabel(name)} ${count}`).join(", ");
-
 /** Commits per activity date: the count and the commits themselves. */
 export type CommitDay = { count: number; commits: Commit[] };
 export function commitDays(list: CommitList): Map<string, CommitDay> {

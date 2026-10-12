@@ -135,3 +135,7 @@ export type RepositoryList = {
   scanned_ms: number | null; directories: number; truncated: boolean;
   settings_problem: string | null;
 };
+
+/** A focus stretch with the windows it spent its own time in; see README "Sessions". */
+export type FocusSession = FocusStretch & { windows: { application: string; title: string; active_ms: number }[] };
+export type SessionList = { resolved: { range: Range; timezone: string }; sessions: FocusSession[] };

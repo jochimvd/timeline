@@ -112,6 +112,9 @@ own client class rather than accepting it from a request. The service offers:
   category and application, and [evidence](#day-evidence) per activity day of a
   selection of at most 31 days, from one coverage scan without image coverage.
   Each day matches the overview metrics of that day.
+- `sessions`: the [sessions](#sessions) of an activity date, consecutive dates or
+  range of at most seven days, in time order. The browser only; MCP clients use
+  `focus_metrics` and `blocks`.
 - `categories`: the configured [categories](#categories) and their rules, plus
   the reason the settings file was ignored, if it was invalid.
 - `commits`: the user's own [git commits](#git-commits) in an activity date,
@@ -327,6 +330,18 @@ edge is cut there, and a transition exactly at its start has no observed
 predecessor. Per-day metrics therefore add up to a multi-day range except for
 stretches and switches across 04:00.
 
+### Sessions
+
+A session is one [focus stretch](#focus-metrics) listed on its own, so a day can be
+read as a chronological account: `sessions` returns every stretch of the range in
+time order, with its range, `elapsed_ms`, subject and bridged `interruptions`,
+and the up to three windows (application and cleaned title) with the most active
+focus on the stretch's own subject. Focus during bridged interruptions counts
+toward the stretch but not toward its windows. Sessions match the stretches the
+overview counts for the same range, come from one coverage pass, and share the
+8 MiB breakdown budget. Like stretches, they describe sustained observed focus,
+not tasks.
+
 ### Day evidence
 
 Each `focus_metrics` day also says how much of it has evidence, so a day without
@@ -510,72 +525,72 @@ input-idle bindings. SQLite access uses [rusqlite](https://docs.rs/rusqlite/).
 With `timeline run` or the user service running, `timeline open` uses `xdg-open`
 to launch the timeline. The launch URL contains a random, single-use credential
 in its fragment, valid for 60 seconds. The page clears the fragment and exchanges
-it for a 12-hour HttpOnly, SameSite=Strict session cookie. The bearer token never
-appears in a URL. Sessions expire on process restart. Public HTML/CSS/JavaScript
+it for a 12-hour HttpOnly, SameSite=Strict session cookie. The cookie carries
+its expiry signed with a key derived from `http.token`, so nothing about sessions
+is stored and they survive restarts; replacing `http.token` ends them all. The
+bearer token never appears in a URL. Public HTML/CSS/JavaScript
 contain no recorded evidence; evidence endpoints require authentication.
 
-The timeline sits above screenshots and supports hover previews, committed
-scrubbing, expandable application or category lanes, focus and screenshot
-coverage, a date picker, zoom/panning, visual category/application/exact-title
-breakdowns, monitor layouts, and image enlargement. Breakdown totals follow the
-visible range. With categories configured, "Color by" switches timeline fills,
-labels and lanes between applications, top-level categories and, once any
-category is nested, subcategories (remembered per browser). Subcategories that
-carry their parent's color are drawn in distinct shades of it. The breakdown adds
-a composition bar of top-level categories and the category tree ranked by time
-within each level, and a collapsed
-"Category rules" panel lists the active definitions. The focus summary leads with
-stat tiles for recorded and active focus, context switches per active hour, the
-longest focus stretch ("Show on timeline" marks it, selects its start and moves
-keyboard focus to the timeline) and the share of active focus in long stretches,
-then a stretch-length bar and an hourly switch table. A timeline track shades each
-hour by its application or category switches (following "Color by") on a fixed
-five-step scale, and the hover preview reports that hour's switches. Like the
-breakdown, metrics follow the loaded range.
+The page has three views, Day, Week and Month, under a slim top bar that also
+holds "Color by" (with categories configured: top-level categories, subcategories
+once any is nested, or applications; remembered per browser), the recording status
+with Pause/Resume, and a settings drawer. The drawer shows the category rules,
+the git repositories (paths searched, repositories found, unreadable ones and
+Rescan; without paths, how to add them), storage details and a short guide to the
+terms. Storage details are read when that tab opens and reused for 30 seconds.
 
-With [git paths](#git-commits) configured, a commit track marks the user's commits
-in the visible range; commits that would overlap at the current scale share a
-numbered marker, which separates when zoomed in. Hovering a marker lists its
-commits (subject, repository, branch, short hash and time) in the timeline
-preview; the track is one tab stop where arrow keys move between markers and focus
-shows the same details. Clicking a marker, or Enter, selects that moment. The
-focus summary lists the loaded range's commits, each selecting its moment. Commits
-are read with the range and checked again about once a minute. A track label
-names repositories that could not be read and opens the collapsed "Git
-repositories" details at the end of the page, which list the configured paths,
-the repositories found, their problems and a Rescan button; without paths it shows
-how to add them. Ticks show seconds only for windows under 20 minutes.
+**Day.** A header names the day, with a date picker, previous/next and Today, and
+whole-day figures: focus (active and idle), switches per active hour, the longest
+stretch (a click marks it on the timeline), deep focus (the share of active focus
+in stretches of 25 minutes or more) and commits. Below, the selected moment's
+screenshots fill a stage (all monitors side by side, or one), with the focused
+window, its application and category; click a screenshot to enlarge it, then to
+toggle native resolution, and step with the arrows. The timeline beneath it shows
+focus as a band colored by "Color by", with idle time striped, time without
+evidence hatched and mixed buckets striped; per-monitor screenshot coverage;
+commit markers, numbered where they would overlap and separating when zoomed in;
+the selection, the session marked from elsewhere and now. A day opens framed on
+its recorded activity. Hover shows a preview card with the time, screenshots,
+window and any commits there; click selects, drag pans (across days too), the
+wheel zooms around the pointer and horizontal scrolling pans. Zoom runs from the
+whole day to one minute, with Fit activity; zoomed in, a strip of the whole day's
+sessions shows the visible window and can be dragged. Arrow keys step screenshots
+anywhere on the page, Shift+arrows pan, +/− zoom, [ and ] change day and Home
+goes to now. A side panel lists the day's sessions in time order, with breaks of
+five minutes or more labeled as idle, paused, locked or not recorded and runs of
+short sessions folded together; the session at the selection is highlighted, and
+a click marks a session and selects its start. The panel also has a breakdown of
+the visible range (categories as a tree, applications and windows) and its
+commits, each selecting its moment; unreadable repositories open the repository
+details. The whole-day figures and sessions are reread at most every 15 seconds
+when live updates change the day, and once a minute for a day in progress.
 
-Day, Week and Month switch views; the URL names the view and period
-(`?date=2026-10-07`, `?view=week&date=2026-10-05`, `?view=month&date=2026-10-01`),
-so it can be linked and survives reload, and Back returns from a day opened from a
-week. Weeks are seven activity days starting on Monday; months are calendar months
-of activity days. Each period view shows stat tiles for recorded focus, switches
-per active hour, the longest stretch ("Show in day view") and time in long
-stretches, each compared with the *comparison period*: the same number of activity
-days immediately before (the previous week, or for a month as many days as it
-has). While a period is in progress, the comparison stops at the same activity day
-and time of day, so weekdays and working hours line up. A day without observed
-evidence (paused, locked, recorder stopped or not yet running) is missing
-evidence, not a day without activity: its column is hatched, the evidence line
-lists such days in both periods, and a comparison period without any evidence
-shows no changes. Below are columns of active focus per day stacked by category
-(following "Color by"; applications fold beyond the top seven) with idle focus on
-top, each category's or application's active focus against the comparison period,
-small multiples of switches per active hour, longest stretch and long-stretch share
-by day, and an hour-of-day heatmap of active focus or switches, hatched where an
-hour has no evidence. With git paths configured, the number of the user's commits
-stands beneath each day's column (a dot where columns are narrow) and in its
-tooltip, by repository, and in the daily table; a day without focus evidence can
-still show commits. Day columns, trend charts and heatmap cells show details on
-hover and keyboard focus; clicking one, or Enter, opens that day (a heatmap cell
-marks its hour). Arrow keys move between days or hours, Shift+arrows change the
-period, and Home returns to the current one. Tables under each chart carry every
-value. An in-progress period reloads every minute while visible.
+**Week and Month.** Both lead with figures for the period, each compared with the
+*comparison period*: the same number of activity days immediately before (the
+previous week, or for a month as many days as it has). While a period is in
+progress, the comparison stops at the same activity day and time of day, so
+weekdays and working hours line up. Changes are shown as arrows in text color,
+not judgements. A day without observed evidence (paused, locked, recorder stopped
+or not yet running) is missing evidence, not a day without activity: it is
+hatched and named in a note, and a comparison period without any evidence shows
+no changes. The week is a calendar: a column per day with its focus and commits,
+its sessions placed by time of day over the hours with activity, hatched gaps,
+commit ticks and a now line; hovering a session lists its windows and clicking
+it opens the day with the session marked. The month is a calendar of days, each
+with its focus, a bar of active focus by category or application, its longest
+stretch and commits, tinted by active focus, followed by its rhythm: average
+active focus per weekday and hour. Beside both, each category's or application's
+active focus against the comparison period, and per-day small multiples of active
+focus, switches per active hour, longest stretch and deep focus. Clicking a day
+opens it. The URL names the view and period (`?date=2026-10-07`,
+`?view=week&date=2026-10-05`, `?view=month&date=2026-10-01`), so it can be linked
+and survives reload, and Back returns from a day opened from a week. An
+in-progress period reloads every minute while visible.
 
 The page follows the system
 light or dark preference; colors come from theme tokens in `web/style.css`. Date changes
-preserve zoom and monitor layout. Superseded requests are aborted and their
+preserve the selected screenshot and monitor layout; dragging across days also
+preserves zoom. Superseded requests are aborted and their
 results discarded, including images still fetching or decoding. Server-side
 selection scans also cancel when a newer generation arrives from the same
 authenticated browser tab; other tabs and MCP remain independent. Adjacent
@@ -676,19 +691,22 @@ npm run test:web
 cargo test --locked
 ```
 
-`web/App.svelte` is the page shell: header, view switch and URL routing
-(`web/routes.ts`), recording status (`web/recording.ts`) and the session bootstrap
-(`web/session.ts`). Week and month views (`PeriodView.svelte`, with
-`DailyFocusChart`, `SubjectComparison`, `TrendChart` and `HourHeatmap`) render
-state from `web/period.ts`, which loads a period and its comparison, and
-`web/trends.ts`, which derives summaries, stacks, changes and heatmap cells.
-`web/commits.ts` clusters commit markers and groups commits by day and repository;
-`RepositoryDetails.svelte` shows where commits come from. The day view (`DayView.svelte`)
-combines `Timeline.svelte`, `EvidenceViewer.svelte` and `Breakdown.svelte` (with
-`FocusPatterns.svelte`); stat tiles share `StatTile.svelte` and the remembered
-"Color by" choice lives in `web/preferences.ts`, the category tree helpers in
-`web/categories.ts`. `web/metrics.ts` holds the
-focus-metric scales and labels and `web/dates.ts` activity-date arithmetic.
+`web/App.svelte` is the page shell: top bar, view switch and URL routing
+(`web/routes.ts`), recording status (`web/recording.ts`), the session bootstrap
+(`web/session.ts`) and `SettingsDrawer.svelte`, opened through `web/drawer.ts`.
+The day view (`DayView.svelte`) combines `Stage.svelte` (screenshots and the
+enlarged dialog), `Scrubber.svelte` (the timeline and its hover card) and a side
+panel of `Journal.svelte` (sessions), `Summary.svelte` and `CommitList.svelte`;
+its whole-day figures and sessions load through `web/dayDetails.ts`. Week and
+month views (`PeriodView.svelte`, with `WeekCalendar`, `MonthCalendar`, `Rhythm`,
+`SubjectChanges` and `Patterns`) render state from `web/period.ts`, which loads a
+period and its comparison, and `web/trends.ts`, which derives summaries, stacks,
+changes and heatmap cells. `web/paint.ts` labels and colors focus by the "Color
+by" choice remembered in `web/preferences.ts`, using the category tree helpers in
+`web/categories.ts`. `web/commits.ts` clusters commit markers and groups commits by
+day and repository. `web/metrics.ts` holds the focus-metric scales and labels,
+`web/dates.ts` activity-date arithmetic and `Icon.svelte` the stroke icons. Theme
+tokens and shared controls live in `web/style.css`; components style themselves.
 `web/model.ts` owns day state, request cancellation and hover scheduling;
 `web/images.ts` owns tile decoding, reuse and bitmap cleanup;
 `ScreenshotCanvas.svelte` owns canvas surfaces. Views render state without manually
@@ -712,9 +730,10 @@ less, original intervals are returned. The viewer derives its bands from these
 rows instead of fetching every activity block separately.
 Opening the viewer selects the latest available screenshot and its activity day.
 With no screenshots, it opens the current activity day without a selection.
-Timeline zoom supports windows down to one minute via the menu or mouse wheel.
-The navigation bar groups activity date, Now, the time-window menu (including
-Fit activity), and the application-lanes toggle. Screenshot stepping skips unavailable
+Choosing a date opens it framed on its recorded activity (`activity_bounds`
+before its one overview read), selecting its first session if nothing is
+selected yet. Timeline zoom supports windows down to one minute via the zoom
+control or mouse wheel. Screenshot stepping skips unavailable
 samples and duplicate monitor timestamps, respects a selected monitor, and can
 cross activity days. Dragging also pans across days, preserving the selected
 image and fetching history on release. Arrow keys step screenshots; Shift+arrows
@@ -738,8 +757,8 @@ server cancellation identities, so neither can supersede the other. The preview
 boundary shows loading only before evidence is first available, then retains
 the previous content until the replacement is ready, without adding a pending-status line. Wheel gestures update the scale immediately and
 coalesce history fetches after 220 ms without another zoom step. Date formatters
-and unchanged lane data are reused, collapsed breakdown charts are mounted only
-when opened, and displayed image content is shared across duplicate capture IDs.
+are reused, side-panel tabs are mounted only when shown, and displayed image
+content is shared across duplicate capture IDs.
 
 For read-only profiling against a running recorder with retained screenshots:
 
@@ -756,8 +775,9 @@ The script prints aggregate resource measurements without credentials, activity
 titles or screenshot contents. See the
 [viewer performance measurements](docs/acceptance/2026-09-22-viewer.md).
 
-To look at the UI with three weeks of varied synthetic focus, demo categories and
-commits in two temporary repositories, run
+To look at the UI with three weeks of varied synthetic focus, demo categories,
+commits in two temporary repositories and mock screenshots of two monitors for the
+last five days, run
 `cargo run --example web_fixture -- --demo 127.0.0.1:47850` and open the printed
 URL. It uses temporary history, settings and repositories, never the desktop,
 retained history or the developer's git configuration.
@@ -778,7 +798,7 @@ tests verify automatic refresh and rejection of obsolete background responses.
 The existing live-capture test remains opt-in. The [integrated acceptance report](docs/acceptance/2026-09-22.md) records the
 physical trial, 30-day synthetic/replay measurements and remaining release gates.
 
-The collapsed Storage details panel reads `/api/storage` only on opening or an
+The drawer's Storage tab reads `/api/storage` only on opening or an
 explicit Refresh. It keeps the previous snapshot visible and never polls. The
 server caches aggregates for 30 seconds. Values show pack bytes, SQLite database
 and journal bytes, compact map bytes, and the RAM preview cache. Tile reuse is

@@ -31,10 +31,12 @@ test("date transitions retain a complete snapshot through resolution, paging, er
     ? { range: day(args.date), timezone: "UTC" } : overview(args.range);
   // Commits follow each overview read; they name the range they were read for.
   let commits = args => ({ resolved: { range: args.range, timezone: "UTC" }, configured: true, commits: [], days: [], repositories: 1, problems: [], settings_problem: null });
+  // Activity bounds frame a chosen date; without any the day opens whole.
+  let bounds = () => ({ activity: null });
   globalThis.fetch = async (url, options) => {
     const operation = url.split("/").at(-1), args = JSON.parse(options.body);
     requests.push({ operation, args });
-    const result = await (operation === "commits" ? commits(args) : respond(operation, args));
+    const result = await (operation === "commits" ? commits(args) : operation === "activity_bounds" ? bounds(args) : respond(operation, args));
     return result instanceof Response ? result : Response.json(result);
   };
   const app = createTimelineApp();
@@ -107,10 +109,26 @@ test("date transitions retain a complete snapshot through resolution, paging, er
 
     const beforeRevisit = requests.length;
     await app.loadDay("2026-09-23");
-    assert.deepEqual(requests.slice(beforeRevisit).map(r => r.operation), ["overview", "commits"],
-      "revisiting a resolved date needs only its actual overview and commits");
+    assert.deepEqual(requests.slice(beforeRevisit).map(r => r.operation), ["activity_bounds", "overview", "commits"],
+      "revisiting a resolved date needs only its activity bounds, actual overview and commits");
     assert.ok(requests.filter(r => r.operation === "overview").every(r => r.args.range && !r.args.date),
       "day changes never scan a discarded overview just to resolve calendar boundaries");
+
+    // A day with recorded activity opens framed on it, in one overview read.
+    const activity = { start_ms: day("2026-09-26").start_ms + 5 * 3_600_000, end_ms: day("2026-09-26").start_ms + 7 * 3_600_000 };
+    bounds = args => ({ activity: args.date === "2026-09-26" ? activity : null });
+    const beforeFit = requests.length;
+    await app.loadDay("2026-09-26");
+    assert.equal(view.zoom, "fit");
+    assert.equal(view.visible.end_ms - view.visible.start_ms, Math.ceil(2 * 3_600_000 * 1.1));
+    assert.ok(Math.abs((view.visible.start_ms + view.visible.end_ms) / 2 - (activity.start_ms + activity.end_ms) / 2) <= 1);
+    assert.deepEqual(requests.slice(beforeFit).filter(r => r.operation === "overview").map(r => r.args.range), [view.visible]);
+    // Unreadable bounds leave the day whole rather than failing it.
+    bounds = () => new Response(JSON.stringify({ error: "busy" }), { status: 409 });
+    await app.loadDay("2026-09-27");
+    assert.equal(view.date, "2026-09-27");
+    assert.equal(view.zoom, "1");
+    assert.deepEqual(view.visible, day("2026-09-27"));
   } finally {
     unsubscribe(); app.dispose();
     Object.assign(globalThis, original);

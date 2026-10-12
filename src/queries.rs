@@ -34,6 +34,7 @@ mod overview;
 mod paging;
 mod scan;
 mod segments;
+mod sessions;
 mod updates;
 pub use commits::{CommitDay, CommitList, RepositoryList};
 use coverage::is_boundary;
@@ -51,6 +52,7 @@ use paging::{Cursor, Pager, decode_cursor, encode_cursor};
 use scan::ScanObservation;
 pub(crate) use segments::initialize;
 use segments::{Plan, Run, Scope};
+pub use sessions::{FocusSession, SessionList, SessionWindow};
 pub use updates::{OverviewChange, OverviewUpdates};
 
 const HOUR: i64 = 3_600_000;

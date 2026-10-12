@@ -7,7 +7,7 @@ export type ColorBy = "application" | "category" | "subcategory";
 const key = "timeline.colorBy";
 const choices: ColorBy[] = ["application", "category", "subcategory"];
 function stored(): ColorBy {
-  try { return choices.find(choice => choice === localStorage.getItem(key)) ?? "application"; } catch { return "application"; }
+  try { return choices.find(choice => choice === localStorage.getItem(key)) ?? "category"; } catch { return "category"; }
 }
 /** Remembered per browser. */
 export const colorBy = writable<ColorBy>(stored());

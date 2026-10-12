@@ -47,7 +47,6 @@ export function categorySwatch(category?: { color?: string | null; palette?: num
     ? { fill: `color-mix(in oklab, ${base.fill}, white ${amount}%)`, ink: "#0b0f14" }
     : { fill: `color-mix(in oklab, ${base.fill}, black ${amount}%)`, ink: "#ffffff" };
 }
-export const swatchStyle = (swatch: Swatch) => `background:${swatch.fill};color:${swatch.ink}`;
 /** Dark or light ink, whichever contrasts more with a `#rrggbb` fill. */
 function readableInk(hex: string) {
   const channel = (offset: number) => {

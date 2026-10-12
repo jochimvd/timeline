@@ -143,6 +143,8 @@ struct Stretches {
     pending_ms: i64,
     longest: Option<FocusStretch>,
     distribution: StretchDistribution,
+    /// Every closed stretch in time order, when asked for.
+    all: Option<Vec<FocusStretch>>,
 }
 impl Stretches {
     fn piece(&mut self, subject: Option<Subject>, range: Range, elapsed_ms: i64) {
@@ -224,6 +226,9 @@ impl Stretches {
             };
             bucket.count += 1;
             bucket.elapsed_ms += stretch.elapsed_ms;
+            if let Some(all) = &mut self.all {
+                all.push(stretch.clone());
+            }
             if self
                 .longest
                 .as_ref()
@@ -398,6 +403,17 @@ impl Metrics {
             );
             start = end;
         }
+    }
+    /// Also keeps every stretch for `finish_with_stretches`.
+    pub fn keeping_stretches(mut self) -> Self {
+        self.stretches.all = Some(Vec::new());
+        self
+    }
+    /// The metrics and, if kept, every stretch in time order.
+    pub fn finish_with_stretches(mut self) -> (FocusMetrics, Vec<FocusStretch>) {
+        self.end_run();
+        let all = self.stretches.all.take().unwrap_or_default();
+        (self.finish(), all)
     }
     pub fn finish(mut self) -> FocusMetrics {
         self.end_run();

@@ -640,3 +640,63 @@ fn evidence_does_not_count_the_future_as_missing() {
             .all(|interval| interval.range.end_ms <= checked)
     );
 }
+
+#[test]
+fn sessions_list_every_stretch_in_time_order_with_its_own_windows() {
+    let dir = tempfile::tempdir().unwrap();
+    let end = Recording::new(dir.path(), 0)
+        .focus(Some("editor"), 10 * MIN)
+        .focus(Some("terminal"), 10 * MIN)
+        .focus(Some("chat"), 30 * S)
+        .focus(Some("editor"), 9 * MIN + 30 * S)
+        .idle(10 * MIN)
+        .focus(Some("chat"), 2 * MIN)
+        .end();
+    let q = queries(dir.path(), true);
+    let range = Range {
+        start_ms: 0,
+        end_ms: end,
+    };
+    let list = q.sessions(Browser, Selection::Range(range)).unwrap();
+    let sessions: Vec<_> = list
+        .sessions
+        .iter()
+        .map(|s| {
+            (
+                s.stretch.subject.clone(),
+                s.stretch.range.start_ms,
+                s.stretch.elapsed_ms,
+            )
+        })
+        .collect();
+    assert_eq!(
+        sessions,
+        [
+            (category("Code"), 0, 30 * MIN),
+            (category("Chat"), 40 * MIN, 2 * MIN)
+        ],
+        "the glance is bridged and idle ends the first stretch"
+    );
+    // The bridged chat glance is not one of the stretch's own windows.
+    let windows: Vec<_> = list.sessions[0]
+        .windows
+        .iter()
+        .map(|w| (w.application.as_str(), w.active_ms))
+        .collect();
+    assert_eq!(
+        windows,
+        [("editor", 19 * MIN + 30 * S), ("terminal", 10 * MIN)]
+    );
+    assert_eq!(list.sessions[0].windows[0].title, "editor window");
+    // Stretches match those the overview counts.
+    let m = metrics(&q, 0, end);
+    assert_eq!(
+        m.stretches.long.count + m.stretches.medium.count + m.stretches.short.count,
+        list.sessions.len() as i64
+    );
+    let week = Range {
+        start_ms: 0,
+        end_ms: 8 * 24 * 60 * MIN + 2 * 60 * MIN,
+    };
+    assert!(q.sessions(Browser, Selection::Range(week)).is_err());
+}

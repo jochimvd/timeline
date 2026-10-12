@@ -60,3 +60,8 @@ export function dateSpan(first: string, last: string) {
   if (sameYear && first.slice(0, 7) === last.slice(0, 7)) return `${Number(first.slice(8))}–${end}`;
   return `${dateLabel(first, sameYear ? { day: "numeric", month: "short" } : { day: "numeric", month: "short", year: "numeric" })} – ${end}`;
 }
+
+/** Opens a date input's picker from a click anywhere on it, not only its own icon. */
+export function openPicker(event: MouseEvent & { currentTarget: HTMLInputElement }) {
+  try { event.currentTarget.showPicker(); } catch { /* Already open, or unsupported: the input still works. */ }
+}
