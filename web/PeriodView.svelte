@@ -9,7 +9,7 @@
   import WeekCalendar from "./WeekCalendar.svelte";
   import { commitDays, commitProblems } from "./commits";
   import { drawer } from "./drawer";
-  import { dateLabel, dateRuns, dateSpan, shortDate, weekNumber } from "./dates";
+  import { dateLabel, dateRuns, dateSpan, headingSizes, shortDate, weekNumber } from "./dates";
   import { clock, duration } from "./format";
   import { plural } from "./metrics";
   import { painter } from "./paint";
@@ -94,7 +94,8 @@
     <div class="title-block">
       <div class="date-nav">
         <button id="period-previous" class="btn icon ghost" aria-label={`Previous ${kind}`} onclick={() => onperiod(period.first, -1)}><Icon name="chevron-left" /></button>
-        <DatePicker {kind} value={period.first} {today} max={today} id="period-date" title={`Choose a ${kind}`} onselect={onperiod}>
+        <DatePicker {kind} value={period.first} {today} max={today} id="period-date" title={`Choose a ${kind}`}
+          sizes={headingSizes(kind, shown.first.slice(0, 4))} onselect={onperiod}>
           <span id="period-heading">{heading}</span>
         </DatePicker>
         <button id="period-next" class="btn icon ghost" aria-label={`Next ${kind}`} onclick={() => onperiod(period.first, 1)}><Icon name="chevron-right" /></button>

@@ -653,8 +653,11 @@ test("day view: screenshots, timeline, sessions, breakdown, monitors and obsolet
     await page.waitForFunction(() => document.querySelector("#toasts")?.textContent.includes("No later screenshot."));
     assert.deepEqual(await page.locator("#day-totals").boundingBox(), head, "a toast moves nothing");
     // Today opens as the viewer does: framed on its activity, its newest capture selected.
+    const arrows = () => Promise.all(["#previous", "#next"].map(async id => (await page.locator(id).boundingBox()).x));
+    const arrowsBefore = await arrows();
     await page.locator("#previous").click();
     await page.waitForFunction(() => document.querySelector("#date").value === "2026-09-21" && document.querySelector("#timeline").getAttribute("aria-busy") === "false");
+    assert.deepEqual(await arrows(), arrowsBefore, "Tuesday to Monday leaves both arrows where they were");
     await page.locator("#today").click();
     await page.waitForFunction(() => document.querySelector("#date").value === "2026-09-22" && document.querySelector("#selected").textContent === "05:00:05"
       && document.querySelector("#images").getAttribute("aria-busy") === "false");
@@ -896,11 +899,15 @@ test("week and month views summarize days, compare honestly and drill into the d
     assert.equal(await page.locator(".month .cell.missing").count(), 22, "days that began without evidence");
     assert.ok(await page.locator(".rhythm .cell[style*='--seq']").count() >= 1, "Tuesday's active hour");
     // Months are picked from the year; a day's calendar can jump there too.
+    const periodArrows = () => Promise.all(["#period-previous", "#period-next"].map(async id => (await page.locator(id).boundingBox()).x));
+    const monthArrows = await periodArrows();
     await page.locator("#period-date").click();
     const months = page.getByRole("dialog", { name: "Choose a month" });
     assert.ok(await months.getByRole("button", { name: "October 2026" }).isDisabled());
     await months.getByRole("button", { name: "August 2026" }).click();
     await page.waitForFunction(() => location.search === "?view=month&date=2026-08-01");
+    await page.waitForFunction(() => document.querySelector("#period-heading").textContent === "August 2026");
+    assert.deepEqual(await periodArrows(), monthArrows, "September to August leaves both arrows where they were");
     await page.locator("#period-current").click();
     await page.waitForFunction(() => location.search === "?view=month&date=2026-09-01" && document.querySelector(".period").getAttribute("aria-busy") === "false");
     await page.locator("#period-date").click();

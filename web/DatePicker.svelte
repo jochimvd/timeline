@@ -2,7 +2,7 @@
   import Icon from "./Icon.svelte";
   import { tick, type Snippet } from "svelte";
   import { addDays, addMonths, dateLabel, dateSpan, daysInMonth, monthStart, weekNumber, weekStart, weekday } from "./dates";
-  let { kind, value, today, max, id, title, onselect, children }: {
+  let { kind, value, today, max, id, title, onselect, children, sizes = [] }: {
     /** What is picked: an activity day, an activity week (by its Monday) or a calendar month (by its first day). */
     kind: "day" | "week" | "month";
     /** The picked day, or the first day of the picked week or month. */
@@ -13,6 +13,9 @@
     onselect: (date: string) => void;
     /** The heading text on the trigger. */
     children: Snippet;
+    /** Every heading the trigger can show, or the widest ones: it keeps their
+     *  width, so the controls beside it stay put from one date to the next. */
+    sizes?: string[];
   } = $props();
 
   let root: HTMLElement;
@@ -104,8 +107,10 @@
 <div class="picker" bind:this={root} onkeydown={key} role="presentation">
   <h1>
     <button type="button" class="trigger" {id} {value} {title} aria-haspopup="dialog" aria-expanded={open} onclick={() => open ? close() : void show()}>
-      {@render children()}
-      <Icon name="chevron-down" size={14} />
+      <span class="heading">
+        <span class="shown">{@render children()}<Icon name="chevron-down" size={14} /></span>
+        {#each sizes as size (size)}<span class="size" aria-hidden="true">{size}<span class="chevron"></span></span>{/each}
+      </span>
     </button>
   </h1>
   {#if open}
@@ -169,7 +174,12 @@
     display: flex; align-items: center; gap: 6px; padding: 2px 8px; border: 0; border-radius: 8px; background: none;
     font: inherit; color: var(--text); cursor: pointer;
   }
-  .trigger > :global(svg) { color: var(--muted); }
+  /* The headings share one cell, which takes the widest; the shown one is centred. */
+  .heading { display: inline-grid; justify-items: center; font-variant-numeric: tabular-nums; }
+  .heading > * { grid-area: 1 / 1; display: flex; align-items: center; gap: 6px; }
+  .shown > :global(svg) { flex: none; color: var(--muted); }
+  .size { visibility: hidden; }
+  .chevron { width: 14px; }
   .trigger:hover, .trigger[aria-expanded="true"] { background: var(--surface-2); }
   .trigger:focus-visible { outline: 2px solid var(--accent); }
   h1 { font-size: 24px; font-weight: 650; letter-spacing: -0.02em; white-space: nowrap; }

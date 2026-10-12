@@ -78,3 +78,13 @@ export function dateRuns(dates: string[]) {
     : `${dateLabel(first, first.slice(0, 7) === last.slice(0, 7) ? { weekday: "short", day: "numeric" } : { weekday: "short", day: "numeric", month: "short" })} – ${shortDate(last)}`);
   return labels.length > 1 ? `${labels.slice(0, -1).join(", ")} and ${labels.at(-1)}` : labels[0] ?? "";
 }
+
+const weekdays = Array.from({ length: 7 }, (_, index) => dateLabel(addDays("2026-01-05", index), { weekday: "long" }));
+const months = Array.from({ length: 12 }, (_, index) => dateLabel(`2026-${String(index + 1).padStart(2, "0")}-01`, { month: "long" }));
+/** Every heading of its kind as wide as the widest can be, given `year` when
+ *  the heading shows one: "Wednesday 28 September", "Week 53", "September 2026". */
+export function headingSizes(kind: "day" | "week" | "month", year = "") {
+  const suffix = year ? " " + year : "";
+  return kind === "week" ? ["Week 53"] : kind === "month" ? months.map(month => month + suffix)
+    : weekdays.flatMap(weekday => months.map(month => `${weekday} 28 ${month}${suffix}`));
+}

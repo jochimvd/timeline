@@ -9,7 +9,7 @@
   import Summary from "./Summary.svelte";
   import type { CategoryNode } from "./categories";
   import { commitProblems } from "./commits";
-  import { addDays, dateLabel } from "./dates";
+  import { addDays, dateLabel, headingSizes } from "./dates";
   import { drawer } from "./drawer";
   import { clock, clockRange, duration } from "./format";
   import { plural } from "./metrics";
@@ -97,7 +97,8 @@
       <div class="date-nav">
         <button id="previous" class="btn icon ghost" aria-label="Previous day" title="Previous day ([)" disabled={!$view.day} onclick={() => app.shiftDate(-1)}>
           <Icon name="chevron-left" /></button>
-        <DatePicker kind="day" value={shown} {today} max={addDays(today, 1)} id="date" title="Choose an activity day" onselect={date => void app.loadDay(date)}>
+        <DatePicker kind="day" value={shown} {today} max={addDays(today, 1)} id="date" title="Choose an activity day"
+          sizes={headingSizes("day", year)} onselect={date => void app.loadDay(date)}>
           <span>{title}{#if year}<span class="year"> {year}</span>{/if}</span>
         </DatePicker>
         <button id="next" class="btn icon ghost" aria-label="Next day" title="Next day (])" disabled={!$view.day} onclick={() => app.shiftDate(1)}>
