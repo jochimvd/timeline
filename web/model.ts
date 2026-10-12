@@ -2,6 +2,7 @@ import { writable, readonly } from "svelte/store";
 import { query, pages } from "./api";
 import type { Session } from "./session";
 import { activityDate as activityDateIn, addDays } from "./dates";
+import { createDayDetails } from "./dayDetails";
 import { createImageLoader, createImagePool, type ImageFrame } from "./images";
 import type { Range, Block, CategoryRow, CommitList, Coverage, FocusMetrics, Overview, Shot, Evidence, OverviewUpdates } from "./types";
 
@@ -16,7 +17,11 @@ export const zoomLevels: { value: string; label: string; durationMs?: number }[]
 ];
 
 export type View = {
-  date: string; timezone: string; settingsPath: string | null; zoom: string; layout: string; fitWidth?: number; navigationBusy: boolean;
+  /** The requested activity day. */
+  date: string;
+  /** The day on screen: the last one loaded, retained while `date` loads with
+   *  its details, so the view changes once. */
+  shown: string; timezone: string; settingsPath: string | null; zoom: string; layout: string; fitWidth?: number; navigationBusy: boolean;
   day?: Range; visible?: Range; loadedRange?: Range; selected: number;
   dayLoading: boolean; rangeLoading: boolean; evidenceLoading: boolean;
   blocks: Block[]; rows: Coverage[]; totals?: Overview["totals"];
@@ -41,7 +46,7 @@ export type View = {
 /** All asynchronous transitions publish complete view state; views never manage requests. */
 export function createTimelineApp() {
   let view: View = {
-    date: "", timezone: Intl.DateTimeFormat().resolvedOptions().timeZone, settingsPath: null, zoom: "1", layout: "grid",
+    date: "", shown: "", timezone: Intl.DateTimeFormat().resolvedOptions().timeZone, settingsPath: null, zoom: "1", layout: "grid",
     navigationBusy: false, selected: 0, dayLoading: true, rangeLoading: false, highlight: null,
     evidenceLoading: false, blocks: [], rows: [], categories: [], commits: null, commitError: "", focus: [], shots: [], frames: null, shotsExpired: false,
     hoverEvidence: { time: null, focus: [], frames: null, expired: false, error: "", loading: false },
@@ -49,6 +54,7 @@ export function createTimelineApp() {
   };
   const store = writable(view);
   const patch = (values: Partial<View>) => { view = { ...view, ...values }; store.set(view); };
+  const details = createDayDetails();
   const imagePool = createImagePool();
   const images = createImageLoader(imagePool);
   const hoverImages = createImageLoader(imagePool, true);
@@ -202,8 +208,11 @@ export function createTimelineApp() {
         }
         const raw = [...rows.values()].sort((a, b) => a.kind.localeCompare(b.kind)
           || (a.range?.start_ms ?? 0) - (b.range?.start_ms ?? 0) || (a.segment ?? 0) - (b.segment ?? 0));
-        publishRows(raw, { totals: update.totals ?? view.totals!, metrics: update.metrics ?? view.metrics! },
-          update.revision, args.range);
+        const totals = update.totals ?? view.totals!;
+        const changed = JSON.stringify(totals) !== JSON.stringify(view.totals);
+        publishRows(raw, { totals, metrics: update.metrics ?? view.metrics! }, update.revision, args.range);
+        // Totals that change for the same range come from live evidence.
+        if (changed) details.changed(view.shown);
         if (hoverActive && !hoverPending && hoverTimer === undefined) hoverTimer = setTimeout(flushHover, 100);
       } else revision = update.revision;
       // New commits do not change the overview; check them about once a minute.
@@ -234,11 +243,13 @@ export function createTimelineApp() {
     const signal = rangeAbort.signal;
     cancelSelection();
     leave();
-    // Keep the last complete timeline while resolving a date and fetching its
+    // Keep the last complete day while resolving a date and fetching its
     // replacement. A drag has already moved visible; explicit date navigation
-    // commits the new scale and rows together, so labels never jump ahead.
+    // commits the new scale, rows and details together, so labels never jump ahead.
     patch({ date, dayLoading: true, rangeLoading: true,
       evidenceLoading: false, highlight: null });
+    // Read alongside the timeline; the day's screenshot follows once it shows.
+    const detailRead = details.read(date, signal);
     try {
       let resolved = resolvedDays.get(date);
       if (!resolved) {
@@ -270,13 +281,16 @@ export function createTimelineApp() {
       // Resolve boundaries without scanning a full day whose overview would be
       // discarded whenever the dragged range straddles two activity days.
       const { overview, raw, commits } = await readRange(range, signal);
-      if (generation !== rangeGeneration) return;
+      const detail = await detailRead;
+      if (generation !== rangeGeneration || !detail) return;
       loadedDate = date;
-      // A chosen date shows only its own evidence; a drag across midnight keeps the selection in view.
-      const elsewhere = center === undefined && selected === undefined && view.evidenceTime !== null
+      // Another day shows only its own evidence, empty until its moment loads;
+      // a drag across midnight keeps the selection in view.
+      const elsewhere = !(center !== undefined && selected === undefined) && view.evidenceTime !== null
         && (view.evidenceTime < day.start_ms || view.evidenceTime >= day.end_ms);
+      details.show(detail);
       publishRows(raw, overview, overview.revision, range, { ...commits,
-        day, timezone: resolved.timezone, visible: range, zoom, fitWidth, dayLoading: false,
+        day, timezone: resolved.timezone, visible: range, zoom, fitWidth, dayLoading: false, shown: date,
         ...(elsewhere ? { frames: null, shots: [], focus: [], shotsExpired: false, evidenceTime: null, evidenceError: "", skip: null } : {}),
         ...(elsewhere || view.frames === null ? { selected: selected ?? range.start_ms } : {}),
       });
@@ -532,6 +546,7 @@ export function createTimelineApp() {
     attached = true;
     patch({ timezone: session.timezone, settingsPath: session.settingsPath });
     refreshTimer = setInterval(() => void refresh(), 5000);
+    details.start(() => active && !document.hidden);
     document.addEventListener("visibilitychange", becameVisible);
     window.addEventListener("focus", becameVisible);
   }
@@ -568,9 +583,10 @@ export function createTimelineApp() {
     cancelRangeTimer();
     document.removeEventListener("visibilitychange", becameVisible);
     window.removeEventListener("focus", becameVisible);
+    details.dispose();
     images.clear();
     hoverImages.clear();
   }
-  return { state: readonly(store), start, dispose, loadDay, select, hover, leave, zoom, pan, panTo, setWidth, shiftDate, jumpNow, openToday, reveal, fitActivity, stepScreenshot, stepZoom, navigateTo, layout, attach, setActive };
+  return { state: readonly(store), details: details.state, start, dispose, loadDay, select, hover, leave, zoom, pan, panTo, setWidth, shiftDate, jumpNow, openToday, reveal, fitActivity, stepScreenshot, stepZoom, navigateTo, layout, attach, setActive };
 }
 export type TimelineApp = ReturnType<typeof createTimelineApp>;

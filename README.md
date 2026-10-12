@@ -746,7 +746,10 @@ Choosing a date opens it framed on its recorded activity (`activity_bounds`
 before its one overview read) and selects its first session; a selection from
 another day does not carry over, so a day without captures shows none. Today
 opens the current activity day as the viewer opens, with its newest capture
-selected. Timeline zoom supports windows down to one minute via the zoom
+selected. Moving to another day, or from a week or month into a day, keeps the
+previous page on screen until the day's timeline, totals and sessions have all
+been read, then shows them at once; its screenshot follows, with an empty
+screenshot view meanwhile. Timeline zoom supports windows down to one minute via the zoom
 control or mouse wheel. Screenshot stepping skips unavailable
 samples and duplicate monitor timestamps, respects a selected monitor, and can
 cross activity days. Arrow keys and the step buttons move to the next capture

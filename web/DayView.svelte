@@ -6,9 +6,7 @@
   import Scrubber from "./Scrubber.svelte";
   import Stage from "./Stage.svelte";
   import Summary from "./Summary.svelte";
-  import { onMount } from "svelte";
   import type { CategoryNode } from "./categories";
-  import { createDayDetails } from "./dayDetails";
   import { addDays, dateLabel } from "./dates";
   import { drawer } from "./drawer";
   import { clock, clockRange, duration } from "./format";
@@ -20,41 +18,32 @@
   import type { Range } from "./types";
   let { app, nodes, choice, today }: { app: TimelineApp; nodes: CategoryNode[]; choice: ColorBy; today: string } = $props();
   const view = $derived(app.state);
-  const details = createDayDetails();
-  const detail = details.state;
+  const detail = $derived(app.details);
   // Breakdown rows carry each category's color; configured categories fill in before they load.
   const known = $derived($view.categories.length ? $view.categories.flatMap(row => row.category === null ? []
     : [{ name: row.category, parent: row.parent, color: row.color, palette: row.palette }]) : nodes);
   const paint = $derived(painter(choice, known));
-  $effect(() => { if ($view.date && $view.date !== $detail.date) void details.load($view.date); });
-  onMount(() => { details.start(); return () => details.dispose(); });
-  // Totals that change for the same loaded range come from live evidence.
-  let lastTotals = "";
-  $effect(() => {
-    const key = JSON.stringify([$view.date, $view.loadedRange]);
-    const totals = JSON.stringify($view.totals);
-    if (lastTotals.startsWith(key + "|") && lastTotals !== key + "|" + totals) details.changed($view.date);
-    lastTotals = key + "|" + totals;
-  });
   // With nothing selected yet, opening a day selects its first session.
   let framed = "";
   $effect(() => {
     const state = $view, list = $detail.sessions;
-    if ($detail.date !== state.date || !list || state.dayLoading || framed === state.date) return;
-    framed = state.date;
+    if ($detail.date !== state.shown || !list || state.dayLoading || framed === state.shown) return;
+    framed = state.shown;
     if (!list.length) return;
     // A moment into the session, past its first capture.
     const first = list[0].range;
     if (state.frames === null && !state.evidenceLoading) void app.select(Math.min(first.end_ms - 1, first.start_ms + 15_000));
   });
 
-  const day = $derived($detail.date === $view.date ? $detail.day : null);
+  /** The day on screen, which stays while another loads. */
+  const shown = $derived($view.shown);
+  const day = $derived($detail.date === shown ? $detail.day : null);
   const metrics = $derived(day?.metrics);
   const switches = $derived(metrics ? switchRate({ switches: { application: metrics.application_switches, category: metrics.category_switches },
     active_ms: metrics.active_ms }, paint.mode) : null);
   const deep = $derived(metrics ? longShare({ long_ms: metrics.stretches.long.elapsed_ms, active_ms: metrics.active_ms }) : null);
   const longest = $derived(metrics?.longest_stretch ?? null);
-  const sessions = $derived($detail.date === $view.date ? $detail.sessions : null);
+  const sessions = $derived($detail.date === shown ? $detail.sessions : null);
   const span = $derived(sessions?.length ? { start_ms: sessions[0].range.start_ms, end_ms: sessions.at(-1)!.range.end_ms } : null);
   const whole = $derived(!!$view.day && !!$view.loadedRange && $view.loadedRange.start_ms <= $view.day.start_ms && $view.loadedRange.end_ms >= $view.day.end_ms);
 
@@ -85,33 +74,33 @@
     else if (event.key === "[" || event.key === "]") { event.preventDefault(); app.shiftDate(event.key === "]" ? 1 : -1); }
     else if (event.key === "Home") { event.preventDefault(); void app.jumpNow(); }
   }
-  const title = $derived($view.date ? dateLabel($view.date, { weekday: "long", day: "numeric", month: "long" }) : "");
-  const year = $derived($view.date && $view.date.slice(0, 4) !== today.slice(0, 4) ? $view.date.slice(0, 4) : "");
+  const title = $derived(shown ? dateLabel(shown, { weekday: "long", day: "numeric", month: "long" }) : "");
+  const year = $derived(shown && shown.slice(0, 4) !== today.slice(0, 4) ? shown.slice(0, 4) : "");
 </script>
 
 <svelte:window onkeydown={key} />
 
-<div class="day">
+<div class="day" aria-busy={$view.dayLoading}>
   <header class="head">
     <div class="title-block">
       <div class="date-nav">
         <button id="previous" class="btn icon ghost" aria-label="Previous day" title="Previous day ([)" disabled={!$view.day} onclick={() => app.shiftDate(-1)}>
           <Icon name="chevron-left" /></button>
-        <DatePicker kind="day" value={$view.date} {today} max={addDays(today, 1)} id="date" title="Choose an activity day" onselect={date => void app.loadDay(date)}>
+        <DatePicker kind="day" value={shown} {today} max={addDays(today, 1)} id="date" title="Choose an activity day" onselect={date => void app.loadDay(date)}>
           <span>{title}{#if year}<span class="year"> {year}</span>{/if}</span>
         </DatePicker>
         <button id="next" class="btn icon ghost" aria-label="Next day" title="Next day (])" disabled={!$view.day} onclick={() => app.shiftDate(1)}>
           <Icon name="chevron-right" /></button>
-        {#if $view.date !== today}
+        {#if shown && shown !== today}
           <button id="today" class="btn small" onclick={() => void app.openToday()}>Today</button>
         {/if}
       </div>
       <p class="subtitle muted num">
         {#if span}{clockRange(span, $view.timezone)} · {plural(sessions!.length, "session")}{:else if sessions}No active focus{:else}&nbsp;{/if}
-        {#if $view.date === today}<span class="live">· live</span>{/if}
+        {#if shown === today}<span class="live">· live</span>{/if}
       </p>
     </div>
-    <dl class="kpis" id="day-totals" class:loading={!day}>
+    <dl class="kpis" id="day-totals" class:loading={!day || $view.dayLoading}>
       <div class="kpi">
         <dt>Focus</dt>
         <dd class="num">{day ? duration(day.totals.focus_ms) || "0 min" : "—"}</dd>
@@ -159,10 +148,10 @@
         <button role="tab" aria-selected={tab === "summary"} onclick={() => tab = "summary"}><Icon name="pie" size={14} />Breakdown</button>
         <button role="tab" aria-selected={tab === "commits"} onclick={() => tab = "commits"}><Icon name="commit" size={14} />Commits{#if commitCount}<span class="count">{commitCount}</span>{/if}</button>
       </div>
-      <div class="panel-body" role="tabpanel">
+      <div class="panel-body" class:stale={$view.dayLoading} role="tabpanel">
         {#if tab === "sessions"}
           <Journal {sessions} evidence={day?.evidence ?? null} {paint} timezone={$view.timezone} selected={$view.selected}
-            loading={$detail.loading} error={$detail.error} onreveal={reveal} />
+            loading={$detail.loading || $view.dayLoading} error={$detail.error} onreveal={reveal} />
         {:else if tab === "summary"}
           <Summary rows={$view.rows} categories={$view.categories} {paint} range={$view.loadedRange} {whole}
             timezone={$view.timezone} loading={$view.rangeLoading} />
@@ -211,6 +200,7 @@
   .tabs button { flex: 1; justify-content: center; }
   .count { font-size: 11px; padding: 0 5px; border-radius: 4px; background: var(--surface-3); color: var(--text-2); }
   .panel-body { flex: 1; overflow: auto; padding: 4px 10px 14px; }
+  .panel-body.stale { opacity: 0.6; }
   @media (max-width: 1180px) {
     .layout { grid-template-columns: 1fr; grid-template-rows: auto; }
     .main { height: max(560px, calc(100vh - 196px)); }

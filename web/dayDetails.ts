@@ -12,6 +12,8 @@ export type DayDetails = {
   error: string;
 };
 
+/** The timeline model reads a day's details with its timeline and shows both
+ *  at once; these only refresh the shown day on their own. */
 export function createDayDetails() {
   let state: DayDetails = { date: "", day: null, sessions: null, loading: false, error: "" };
   const store = writable(state);
@@ -21,31 +23,43 @@ export function createDayDetails() {
   /** When the shown day was last read, on the monotonic clock. */
   let readAt = -Infinity;
 
-  async function load(date: string, background = false) {
-    if (!date || disposed) return;
-    const current = ++generation;
-    abort.abort();
-    abort = new AbortController();
-    const signal = abort.signal;
-    patch(background ? { loading: true } : { date, loading: true, error: "", ...(state.date === date ? {} : { day: null, sessions: null }) });
+  /** Reads `date`'s details without showing them; a failure is part of the
+   *  result, so the day still shows. Null once `signal` aborts. */
+  async function read(date: string, signal: AbortSignal): Promise<DayDetails | null> {
     readAt = performance.now();
     try {
       // Sequential, so the day view never holds more than one extra admission slot.
       const metrics = await query<FocusMetricsByDay>("focus_metrics", { date }, signal);
       const sessions = await query<SessionList>("sessions", { date }, signal);
-      if (current !== generation) return;
-      patch({ date, day: metrics.days[0] ?? null, sessions: sessions.sessions, loading: false, error: "" });
+      return { date, day: metrics.days[0] ?? null, sessions: sessions.sessions, loading: false, error: "" };
     } catch (error) {
-      if (current !== generation || signal.aborted) return;
-      patch({ loading: false, error: error instanceof Error ? error.message : String(error) });
+      if (signal.aborted) return null;
+      return { date, day: null, sessions: null, loading: false, error: error instanceof Error ? error.message : String(error) };
     }
   }
-  /** Reloads a day in progress about once a minute while the page is visible. */
-  function start() {
+  /** Shows details read for a newly shown day, superseding any reload. */
+  function show(details: DayDetails) {
+    generation++;
+    abort.abort();
+    patch(details);
+  }
+  /** Rereads the shown day, keeping its details meanwhile. */
+  async function reload() {
+    if (!state.date || disposed) return;
+    const current = ++generation;
+    abort.abort();
+    abort = new AbortController();
+    patch({ loading: true });
+    const details = await read(state.date, abort.signal);
+    if (current !== generation || !details) return;
+    patch(details.error ? { loading: false, error: details.error } : details);
+  }
+  /** Reloads a day in progress about once a minute while `visible`. */
+  function start(visible: () => boolean) {
     timer = setInterval(() => {
       const day = state.day;
-      if (!document.hidden && day && day.range.start_ms <= Date.now() && Date.now() < day.range.end_ms && !state.loading)
-        void load(state.date, true);
+      if (visible() && day && day.range.start_ms <= Date.now() && Date.now() < day.range.end_ms && !state.loading)
+        void reload();
     }, 60_000);
   }
   let trailing: ReturnType<typeof setTimeout> | undefined;
@@ -54,10 +68,9 @@ export function createDayDetails() {
     if (date !== state.date || trailing !== undefined) return;
     trailing = setTimeout(() => {
       trailing = undefined;
-      if (date === state.date && !disposed) void load(date, true);
+      if (date === state.date && !disposed) void reload();
     }, Math.max(0, readAt + 15_000 - performance.now()));
   }
   function dispose() { disposed = true; generation++; abort.abort(); clearInterval(timer); clearTimeout(trailing); }
-  return { state: readonly(store), load, start, changed, dispose };
+  return { state: readonly(store), read, show, start, changed, dispose };
 }
-export type DayDetailsModel = ReturnType<typeof createDayDetails>;

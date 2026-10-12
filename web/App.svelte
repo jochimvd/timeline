@@ -27,16 +27,26 @@
   let categoryList = $state<CategoryList | null>(null);
   let dayAttached = false;
   const selected = $derived(route.view === "day" ? null : period(route.view, route.date));
-  /** The view on screen. Entering a week or month keeps the day on screen until
-   *  the period has loaded, as the period view keeps an earlier period, so the
-   *  page changes once instead of in steps. */
+  /** The view on screen. Switching between a day and a week or month keeps the
+   *  previous view on screen until the next has loaded, as each view keeps its
+   *  previous day or period, so the page changes once instead of in steps. */
   let shown = $state<"day" | "period">(untrack(() => route.view) === "day" ? "day" : "period");
   const periodReady = $derived(!!selected && !$periodState.loading && $periodState.period?.kind === selected.kind && $periodState.period.first === selected.first);
   $effect(() => {
-    if (route.view === "day") shown = "day";
+    if (route.view === "day") { if (!$day.dayLoading) shown = "day"; }
     else if (periodReady) shown = "period";
   });
-  const pending = $derived(!!session && !!selected && (shown === "day" || $periodState.loading));
+  /** Set when drilling into a day: the timeline takes focus once it shows. */
+  let drilled = false;
+  $effect(() => {
+    if (shown !== "day" || !drilled) return;
+    drilled = false;
+    void tick().then(() => {
+      window.scrollTo({ top: 0 });
+      document.getElementById("timeline")?.focus({ preventScroll: true });
+    });
+  });
+  const pending = $derived(!!session && (selected ? shown === "day" || $periodState.loading : shown === "period"));
   const timezone = $derived(session?.timezone ?? $day.timezone);
   let now = $state(Date.now());
   const today = $derived(activityDate(now, timezone));
@@ -48,6 +58,7 @@
     if (mode !== "none" && !sameRoute(next, parseRoute(location.search)))
       history[mode === "push" ? "pushState" : "replaceState"](null, "", routeSearch(next));
     route = next;
+    drilled = false;
     apply();
   }
   function apply() {
@@ -66,7 +77,7 @@
     }
   }
   /** Drills into a day, optionally marking a range such as a session. */
-  async function openDay(date: string, range?: Range) {
+  function openDay(date: string, range?: Range) {
     if (!session) return;
     history.pushState(null, "", routeSearch({ view: "day", date }));
     route = { view: "day", date };
@@ -74,9 +85,7 @@
     app.setActive(true);
     if (!dayAttached) { dayAttached = true; app.attach(session); }
     void (range ? app.reveal(range) : app.loadDay(date));
-    await tick();
-    window.scrollTo({ top: 0 });
-    document.getElementById("timeline")?.focus({ preventScroll: true });
+    drilled = true;
   }
   function changePeriod(date: string | null, delta = 0) {
     if (!selected) return;
@@ -108,8 +117,8 @@
   });
   $effect(() => {
     document.title = (selected ? periodTitle(selected)
-      : $day.date ? dateLabel($day.date, { weekday: "short", day: "numeric", month: "short" }) : "Timeline")
-      + (selected || $day.date ? " · Timeline" : "");
+      : $day.shown ? dateLabel($day.shown, { weekday: "short", day: "numeric", month: "short" }) : "Timeline")
+      + (selected || $day.shown ? " · Timeline" : "");
   });
   onMount(() => {
     const lifetime = new AbortController();
@@ -186,7 +195,7 @@
     {#if shown === "day"}
       <DayView {app} {nodes} {choice} {today} />
     {:else if selected}
-      <PeriodView model={periods} period={selected} {today} {choice} onperiod={changePeriod} onopen={(date, range) => void openDay(date, range)} />
+      <PeriodView model={periods} period={selected} {today} {choice} onperiod={changePeriod} onopen={openDay} />
     {/if}
   </main>
 </div>
