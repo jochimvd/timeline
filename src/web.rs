@@ -458,9 +458,6 @@ fn evidence(
             a.direction.ok_or_else(invalid)?,
             a.monitor.as_deref(),
         )?)?,
-        "latest_screenshot" => {
-            serde_json::to_value(queries.latest_screenshot(client, a.monitor.as_deref())?)?
-        }
         "screenshot_step" => serde_json::to_value(queries.screenshot_step(
             client,
             a.selected_ms.ok_or_else(invalid)?,

@@ -432,17 +432,16 @@ export function createTimelineApp() {
   }
   /** Where now sits on the timeline: near its end, since nothing follows it yet. */
   const NOW_ANCHOR = 0.85;
-  /** Selects the newest capture of the current activity day with its focus, since
-   *  the present moment has neither until the next capture and observation;
-   *  without one, now itself. */
+  /** Selects the newest capture of the current activity day, since the present
+   *  moment has no screenshot until the next one; without one, now itself. */
   async function jumpNow() {
     navigationAbort.abort(); navigationAbort = new AbortController();
     const signal = navigationAbort.signal;
     const now = Date.now();
     let ms = now;
     try {
-      const latest = await query<number | null>("latest_screenshot",
-        view.layout.startsWith("monitor:") ? { monitor: view.layout.slice(8) } : {}, signal);
+      const latest = await query<number | null>("adjacent_screenshot", { selected_ms: now + 1, direction: -1,
+        ...(view.layout.startsWith("monitor:") ? { monitor: view.layout.slice(8) } : {}) }, signal);
       if (latest !== null && activityDate(latest) === activityDate(now)) ms = latest;
     } catch (error) {
       if (signal.aborted) return;

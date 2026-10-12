@@ -78,10 +78,12 @@ impl<'a> Focus<'a> {
         self.previous = Some(next);
         Ok(())
     }
-    /// `latest` is the latest retained observation, if the plan scanned it.
+    /// `latest` is the latest retained observation, if the plan scanned it;
+    /// `screenshots` the latest screenshot row the cursor pins.
     fn finish(
         mut self,
         latest: Option<i64>,
+        screenshots: i64,
         visit: &mut impl FnMut(Coverage) -> Result<()>,
     ) -> Result<()> {
         if self.furthest >= self.range.end_ms {
@@ -97,17 +99,54 @@ impl<'a> Focus<'a> {
             .previous
             .take()
             .filter(|o| Some(o.id) == latest && o.unix_ms <= tail.start_ms);
-        match previous.map(|o| (self.classify(&o.evidence), o)) {
-            Some((focus @ FocusCoverage::Gap { .. }, o)) => visit(Coverage {
+        let Some(o) = previous else {
+            return visit(unknown(tail));
+        };
+        let focus = self.classify(&o.evidence);
+        if let FocusCoverage::Gap { .. } = focus {
+            return visit(Coverage {
                 range: tail,
                 segment: Some(o.segment),
                 observation: Some(o.id),
                 recording_boundary: self.recording_boundary()?,
                 elapsed_ms: None,
                 focus,
-            }),
-            _ => visit(unknown(tail)),
+            });
         }
+        // A capture is also a durable endpoint: the recorder commits focus
+        // changes before it takes one, so focus held through the latest capture
+        // of its timing segment. Only within the loss bound, as checkpoints
+        // would otherwise have followed.
+        let mut start = tail.start_ms;
+        if matches!(
+            focus,
+            FocusCoverage::Focus { .. } | FocusCoverage::NoFocus { .. }
+        ) && let Some((unix_ms, monotonic_ms)) = self.queries.capture_after(&o, screenshots)?
+        {
+            let through = ScanObservation {
+                unix_ms: unix_ms.saturating_add(1),
+                monotonic_ms: monotonic_ms.saturating_add(1),
+                evidence: o.evidence.clone(),
+                ..o
+            };
+            let end = through.unix_ms.min(tail.end_ms);
+            if end > start {
+                let clipped = Range {
+                    start_ms: start,
+                    end_ms: end,
+                };
+                let recording_boundary = self.recording_boundary()?;
+                visit(interval(&o, &through, clipped, recording_boundary, focus))?;
+                start = end;
+            }
+        }
+        if start < tail.end_ms {
+            visit(unknown(Range {
+                start_ms: start,
+                end_ms: tail.end_ms,
+            }))?;
+        }
+        Ok(())
     }
 }
 
@@ -165,7 +204,34 @@ impl Queries {
             }
             focus.push(observation, consecutive, &mut visit)
         })?;
-        focus.finish(plan.last, &mut visit)
+        focus.finish(plan.last, cursor.screenshots, &mut visit)
+    }
+    /// The latest successful capture after `observation` in its timing segment
+    /// and within the loss bound, as wall and monotonic time.
+    fn capture_after(
+        &self,
+        observation: &ScanObservation,
+        screenshots: i64,
+    ) -> Result<Option<(i64, i64)>> {
+        Ok(self
+            .history
+            .connection
+            .prepare_cached(
+                "SELECT unix_ms,monotonic_ms FROM screenshots WHERE unix_ms>?1 AND id<=?2
+                    AND segment=?3 AND monotonic_ms BETWEEN ?4 AND ?4+?5 AND image IS NOT NULL
+                    ORDER BY unix_ms DESC LIMIT 1",
+            )?
+            .query_row(
+                params![
+                    observation.unix_ms,
+                    screenshots,
+                    observation.segment,
+                    observation.monotonic_ms,
+                    crate::config::LOSS_BOUND_MS
+                ],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?)
     }
 
     pub fn blocks(&self, client: Client, range: Range, page: PageRequest) -> Result<Page<Block>> {

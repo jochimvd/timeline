@@ -1331,9 +1331,6 @@ fn navigation_uses_real_activity_and_distinct_capture_times_across_days() {
         q.adjacent_screenshot(Browser, 0, 0, None),
         QueryError::InvalidRequest,
     );
-    // Focus is committed until 9000: the next day's capture waits for evidence.
-    assert_eq!(q.latest_screenshot(Browser, None).unwrap(), Some(2000));
-    assert_eq!(q.latest_screenshot(Browser, Some("C")).unwrap(), None);
     let bounds = q
         .activity_bounds(Browser, Selection::Range(range(0, 10_000)))
         .unwrap();
@@ -1648,4 +1645,65 @@ fn screenshot_steps_pass_over_small_changes_but_not_windows_or_pauses() {
         q.screenshot_step(Browser, 0, 0, None),
         QueryError::InvalidRequest,
     );
+}
+
+#[test]
+fn focus_holds_through_the_latest_capture_within_the_loss_bound() {
+    let capture = |segment, wall, monitor: &str| ScreenshotSample {
+        segment,
+        ..sample(wall, monitor)
+    };
+    let focus_at = |q: &Queries, ms| {
+        q.cursor_evidence(Browser, ms, None).unwrap().focus[0]
+            .focus
+            .clone()
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = History::open(dir.path()).unwrap();
+    put(&mut h, 0, 0, 1, StateChange::Focus, state(Some("A"), false));
+    put(
+        &mut h,
+        4000,
+        4000,
+        1,
+        StateChange::Checkpoint,
+        state(Some("A"), false),
+    );
+    let image = History::prepare_image(dir.path(), &common::webp(b"pixels")).unwrap();
+    h.commit_screenshot(&capture(1, 7000, "A"), "pixels", &image)
+        .unwrap();
+    let q = Queries::open(dir.path()).unwrap();
+    // The capture proves the recorder ran: focus is known through its moment.
+    assert!(matches!(focus_at(&q, 7000), FocusCoverage::Focus { .. }));
+    assert!(matches!(focus_at(&q, 7001), FocusCoverage::Unknown));
+    let totals = q
+        .overview(Browser, Selection::Range(range(0, 10_000)), page(100, None))
+        .unwrap()
+        .totals;
+    assert_eq!(totals.focus_ms, 7001);
+
+    // A failed capture, one from another timing segment or one beyond the loss
+    // bound proves nothing about focus.
+    let name = h.find_image("pixels").unwrap().unwrap();
+    h.screenshot_gap(&capture(1, 7500, "B"), "capture_failed")
+        .unwrap();
+    h.reuse_screenshot(&capture(2, 8000, "B"), &name)
+        .unwrap()
+        .unwrap();
+    h.reuse_screenshot(&capture(1, 9001, "B"), &name)
+        .unwrap()
+        .unwrap();
+    let q = Queries::open(dir.path()).unwrap();
+    for ms in [7500, 8000, 9001] {
+        assert!(matches!(focus_at(&q, ms), FocusCoverage::Unknown), "{ms}");
+    }
+    assert!(matches!(focus_at(&q, 7000), FocusCoverage::Focus { .. }));
+
+    // A pause still ends known focus, captured or not.
+    let mut paused = state(None, false);
+    paused.manual_paused = true;
+    paused.focus_known = false;
+    put(&mut h, 7200, 7200, 1, StateChange::Pause, paused);
+    let q = Queries::open(dir.path()).unwrap();
+    assert!(matches!(focus_at(&q, 9001), FocusCoverage::Gap { reason } if reason == "pause"));
 }

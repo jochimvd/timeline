@@ -69,7 +69,11 @@ Unknown focus is distinct from a confirmed absence of a focused window.
 
 Each observed change is committed with SQLite WAL and full synchronization.
 Continued known focus is checkpointed every four seconds, leaving scheduling
-headroom within the agreed five-second healthy-operation loss bound. A restart
+headroom within the agreed five-second healthy-operation loss bound. Focus is
+known up to its last durable endpoint: the next observation or, after the latest
+one, a successful capture of the same timing segment within the loss bound. The
+recorder commits focus changes before it captures, so a capture proves focus held
+until then; failed captures and pause, lock or disconnect still end it. A restart
 references the last durable observation and starts fresh coverage. Suspend, event
 stalls over ten seconds, and clock discontinuities over one second create new
 timing segments; focus duration must never be inferred across these boundaries.
@@ -139,10 +143,6 @@ own client class rather than accepting it from a request. The service offers:
   than a minute without captures. One step looks at most three hours or 5,000
   captures ahead; without a difference it lands on the furthest one. The browser
   only.
-- `latest_screenshot`: the newest capture whose moment has committed focus
-  evidence, optionally on one monitor: one taken before the latest observation,
-  since focus after it is only known once the next observation arrives. The
-  browser only.
 - `image`: retrieve the exact screenshot ID and its metadata with a bounded byte
   stream; missing/expired references or files return `QueryError::Unavailable`.
   `preview` returns a lossy rendition of at most 64–4096 pixels per edge instead.
@@ -752,7 +752,7 @@ that looks different (`screenshot_step`) and note how much they passed over;
 `,` and `.` or Alt-click step one capture at a time. Dragging also pans across days, preserving the selected
 image and fetching history on release. Arrow keys step through changes; Shift+arrows
 pan, +/- zoom, and Home jumps to now: the newest capture of the current activity
-day with its focus (`latest_screenshot`), with now near the end of the timeline. Fit activity frames observed focus and
+day, with now near the end of the timeline. Fit activity frames observed focus and
 available screenshot coverage rather than empty hours.
 Click an enlarged screenshot to toggle between fitting the window and native
 resolution; scroll to inspect a large native image. Click outside the image,
