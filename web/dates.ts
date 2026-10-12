@@ -61,6 +61,19 @@ export function dateSpan(first: string, last: string) {
   return `${dateLabel(first, sameYear ? { day: "numeric", month: "short" } : { day: "numeric", month: "short", year: "numeric" })} – ${end}`;
 }
 
+/** Sorted dates as runs of consecutive days: "Mon 21 Sept, Wed 23 – Fri 25 Sept and Mon 5 Oct". */
+export function dateRuns(dates: string[]) {
+  const runs: [string, string][] = [];
+  for (const date of dates) {
+    const run = runs.at(-1);
+    if (run && addDays(run[1], 1) === date) run[1] = date;
+    else runs.push([date, date]);
+  }
+  const labels = runs.map(([first, last]) => first === last ? shortDate(first)
+    : `${dateLabel(first, first.slice(0, 7) === last.slice(0, 7) ? { weekday: "short", day: "numeric" } : { weekday: "short", day: "numeric", month: "short" })} – ${shortDate(last)}`);
+  return labels.length > 1 ? `${labels.slice(0, -1).join(", ")} and ${labels.at(-1)}` : labels[0] ?? "";
+}
+
 /** Opens a date input's picker from a click anywhere on it, not only its own icon. */
 export function openPicker(event: MouseEvent & { currentTarget: HTMLInputElement }) {
   try { event.currentTarget.showPicker(); } catch { /* Already open, or unsupported: the input still works. */ }

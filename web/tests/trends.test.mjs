@@ -32,6 +32,8 @@ test("routes round-trip views, normalize periods and reject malformed dates", ()
     "a month compares with as many days before it");
   assert.equal(routes.periodTitle(sunday), "Week of 5–11 Oct 2026");
   assert.equal(dates.dateSpan("2026-12-28", "2027-01-03"), "28 Dec 2026 – 3 Jan 2027");
+  assert.equal(dates.dateRuns(["2026-09-21", "2026-09-23", "2026-09-24", "2026-09-25", "2026-09-30", "2026-10-01"]),
+    "Mon 21 Sept, Wed 23 – Fri 25 Sept and Wed 30 Sept – Thu 1 Oct");
   assert.equal(dates.activityDate(Date.parse("2026-10-07T03:59:00Z"), "UTC"), "2026-10-06", "before 04:00 belongs to the previous day");
 });
 

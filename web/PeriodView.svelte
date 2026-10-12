@@ -6,7 +6,7 @@
   import SubjectChanges from "./SubjectChanges.svelte";
   import WeekCalendar from "./WeekCalendar.svelte";
   import { commitDays, commitProblems } from "./commits";
-  import { dateLabel, dateSpan, openPicker, shortDate } from "./dates";
+  import { dateLabel, dateRuns, dateSpan, openPicker, shortDate } from "./dates";
   import { clock, duration } from "./format";
   import { plural } from "./metrics";
   import { painter } from "./paint";
@@ -24,8 +24,8 @@
   } = $props();
   const view = $derived(model.state);
   const data = $derived($view.current);
-  /** The loaded period, which may lag the requested one while it loads. */
-  const shown = $derived($view.period ?? period);
+  /** The loaded period, which stays while the requested `period` loads. */
+  const shown = $derived($view.shown ?? period);
   const now = $derived($view.now);
   const timezone = $derived($view.timezone);
   const paint = $derived(painter(choice, $view.categories));
@@ -36,7 +36,7 @@
   const name = $derived(comparisonName(shown));
   const kind = $derived(shown.kind);
   const inProgress = $derived(containsDate(shown, today));
-  const commitList = $derived($view.commits && $view.commits.resolved.range.start_ms === data?.resolved.range.start_ms ? $view.commits : null);
+  const commitList = $derived($view.commits);
   const commits = $derived(commitList ? commitDays(commitList) : undefined);
   const commitNote = $derived($view.commitError ? `Commits unavailable: ${$view.commitError}` : commitProblems(commitList));
 
@@ -62,7 +62,9 @@
     { id: "period-deep", label: "Deep focus", value: deep(current) === null ? "—" : deep(current)!.toFixed(0), unit: "%",
       caption: `${duration(current.long_ms) || "0 min"} in stretches ≥ 25 min`, delta: change(deepDelta) },
   ] : []);
-  const evidenceNote = $derived(current?.missing.length ? `No recording on ${current.missing.map(shortDate).join(", ")}` : "");
+  const evidenceNote = $derived(!current?.missing.length ? ""
+    : current.missing.length === current.elapsed_days ? `Nothing was recorded ${inProgress ? "so far this" : "in this"} ${kind}`
+    : `No recording on ${current.missing.length === 1 ? "" : `${current.missing.length} days, `}${dateRuns(current.missing)}`);
   const changeDate = (event: Event) => { const value = (event.currentTarget as HTMLInputElement).value; if (value) onperiod(value); };
   const weekNumber = (date: string) => {
     const d = new Date(date + "T12:00:00Z");
@@ -135,7 +137,7 @@
     <div class="layout" class:stale={$view.loading}>
       <div class="main">
         {#if kind === "week"}
-          <WeekCalendar days={data.days} {paint} {timezone} {now} {today} {commits} {onopen} />
+          <WeekCalendar days={data.days} sessions={$view.sessions} error={$view.sessionError} {paint} {timezone} {now} {today} {commits} {onopen} />
         {:else}
           <MonthCalendar days={data.days} {paint} {now} {today} {commits} {onopen} />
           <Rhythm days={data.days} {timezone} {now} />
@@ -148,7 +150,7 @@
       </aside>
     </div>
   {:else if $view.loading}
-    <div class="loading"><span class="spinner"></span>Loading {kind}…</div>
+    <div class="loading-note"><span class="spinner"></span>Loading {kind}…</div>
   {/if}
   <p class="foot muted">Changes compare with the {name}{inProgress ? `, up to ${samePoint(shown)}` : ""}. Ticks mark the {name}; arrows are changes, not judgements.</p>
 </div>
@@ -179,7 +181,7 @@
   .layout { display: grid; grid-template-columns: minmax(0, 1fr) 360px; gap: 16px; align-items: start; transition: opacity 0.2s; }
   .layout.stale { opacity: 0.6; }
   .main, .side { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
-  .loading { display: flex; align-items: center; gap: 10px; color: var(--muted); padding: 40px; justify-content: center; }
+  .loading-note { display: flex; align-items: center; gap: 10px; color: var(--muted); padding: 40px; justify-content: center; }
   .foot { font-size: 12px; }
   @media (max-width: 1180px) { .layout { grid-template-columns: 1fr; } }
   @media (max-width: 700px) { .kpi { min-width: calc(50% - 4px); flex: 1; } .date-picker h1 { font-size: 19px; } }

@@ -24,13 +24,19 @@ test("an in-progress period compares with the same activity day and time of the 
     const operation = url.split("/").at(-1), args = JSON.parse(options.body);
     requests.push({ operation, args });
     if (operation === "categories") return Response.json({ categories: [], problem: null });
+    if (operation === "commits") return Response.json({ configured: false, commits: [] });
+    if (operation === "sessions") return Response.json({ sessions: [{ range: dayRange(args.dates.first) }] });
     if (operation === "resolve_range") return Response.json({ range: dayRange(args.date), timezone: "UTC" });
     if (args.dates) return Response.json(metrics(datesFrom(args.dates.first, 7)));
     return Response.json(metrics(datesFrom("2026-09-28", 3), args.range));
   };
   const model = createPeriodModel();
   let state;
-  const unsubscribe = model.state.subscribe(value => state = value);
+  const shown = [];
+  const unsubscribe = model.state.subscribe(value => {
+    if (value.current && value.current !== state?.current) shown.push(value);
+    state = value;
+  });
   try {
     await model.load(period("week", "2026-10-07"));
     const comparison = requests.filter(request => request.operation === "focus_metrics").at(-1).args;
@@ -38,6 +44,10 @@ test("an in-progress period compares with the same activity day and time of the 
     assert.equal(state.comparison.partial, true);
     assert.equal(state.comparison.last, "2026-09-30");
     assert.equal(state.current.days.length, 7);
+    // The week shows once, with its sessions, rather than filling in.
+    assert.equal(shown.length, 1);
+    assert.equal(shown[0].shown.first, "2026-10-05");
+    assert.equal(shown[0].sessions.length, 1);
 
     // A past period compares with the whole previous one, by dates.
     requests.length = 0;
@@ -47,16 +57,16 @@ test("an in-progress period compares with the same activity day and time of the 
     assert.equal(state.comparison.partial, false);
 
     // An older request finishing late never replaces a newer period.
-    let release;
+    const held = [];
     globalThis.fetch = async (url, options) => {
       const args = JSON.parse(options.body);
-      if (args.dates?.first === "2026-08-03") await new Promise(resolve => release = resolve);
+      if (args.dates?.first === "2026-08-03") await new Promise(resolve => held.push(resolve));
       if (url.endsWith("categories")) return Response.json({ categories: [], problem: null });
       return Response.json(metrics(datesFrom(args.dates?.first ?? "2026-08-31", 7)));
     };
     const obsolete = model.load(period("week", "2026-08-05"));
     await model.load(period("week", "2026-09-08"));
-    release();
+    held.forEach(release => release());
     await obsolete;
     assert.equal(state.period.first, "2026-09-07");
     assert.equal(state.current.days[0].date, "2026-09-07");

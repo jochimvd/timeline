@@ -1,32 +1,17 @@
 <script lang="ts">
-  import { query } from "./api";
-  import { commitCount, type CommitDay } from "./commits";
+  import Icon from "./Icon.svelte";
+  import { commitCount, repositoryLabel, type CommitDay } from "./commits";
   import { dateLabel } from "./dates";
   import { clock, clockRange, duration } from "./format";
   import type { Painter } from "./paint";
   import { dayState, gapLabel } from "./trends";
-  import type { DayFocusMetrics, FocusSession, Range, SessionList } from "./types";
+  import type { Commit, DayFocusMetrics, FocusSession, Range } from "./types";
   /** A week as calendar columns: each day's sessions placed by time of day. */
-  let { days, paint, timezone, now, today, commits, onopen }: {
-    days: DayFocusMetrics[]; paint: Painter; timezone: string; now: number; today: string;
+  let { days, sessions, error, paint, timezone, now, today, commits, onopen }: {
+    days: DayFocusMetrics[]; sessions: FocusSession[] | null; error: string; paint: Painter; timezone: string; now: number; today: string;
     commits?: Map<string, CommitDay>; onopen: (date: string, range?: Range) => void;
   } = $props();
   const HOUR = 3_600_000;
-  let sessions = $state<FocusSession[] | null>(null), error = $state("");
-  let loadedFor = "";
-  $effect(() => {
-    const first = days[0]?.date, last = days.at(-1)?.date;
-    const key = `${first}:${last}:${days.at(-1)?.evidence.observed_ms}`;
-    if (!first || !last || key === loadedFor) return;
-    const sameWeek = loadedFor.startsWith(`${first}:${last}:`);
-    loadedFor = key;
-    const controller = new AbortController();
-    if (!sameWeek) sessions = null;
-    query<SessionList>("sessions", { dates: { first, last } }, controller.signal)
-      .then(list => { sessions = list.sessions; error = ""; })
-      .catch(e => { if (!controller.signal.aborted) error = e instanceof Error ? e.message : String(e); });
-    return () => controller.abort();
-  });
   /** Hours after the activity day's 04:00 start, plus four: a local clock hour except across a DST change. */
   const hourOf = (day: DayFocusMetrics, ms: number) => 4 + (ms - day.range.start_ms) / HOUR;
   const byDay = $derived(days.map(day => ({ day, sessions: (sessions ?? []).filter(s => s.range.start_ms >= day.range.start_ms && s.range.start_ms < day.range.end_ms) })));
@@ -53,6 +38,12 @@
   function show(event: PointerEvent, session: FocusSession) {
     const rect = (event.currentTarget as HTMLElement).getBoundingClientRect();
     hover = { session, x: rect.right + 8, y: rect.top };
+  }
+  // Raw: the hovered commit is compared by identity.
+  let commitHover = $state.raw<{ commit: Commit; x: number; y: number } | null>(null);
+  function showCommit(event: PointerEvent, commit: Commit) {
+    const rect = (event.currentTarget as HTMLElement).getBoundingClientRect();
+    commitHover = { commit, x: rect.right + 8, y: rect.top - 8 };
   }
   let viewport = $state(1200);
 </script>
@@ -106,7 +97,9 @@
           </button>
         {/each}
         {#each commits?.get(day.date)?.commits ?? [] as commit (commit.repository + commit.hash)}
-          <span class="commit" style:top={y(day, commit.time_ms) + "px"} title={`${commit.subject} · ${clock(commit.time_ms, timezone)}`}></span>
+          <span class="commit" role="img" class:active={commitHover?.commit === commit} style:top={y(day, commit.time_ms) + "px"}
+            aria-label={`Commit: ${commit.subject}, ${repositoryLabel(commit.repository)}, ${clock(commit.time_ms, timezone)}`}
+            onpointerenter={event => showCommit(event, commit)} onpointerleave={() => commitHover = null}></span>
         {/each}
         {#if day.range.start_ms <= now && now < day.range.end_ms && hourOf(day, now) >= bounds.low && hourOf(day, now) <= bounds.high}
           <div class="now" style:top={y(day, now) + "px"}></div>
@@ -114,7 +107,7 @@
       </div>
     {/each}
   </div>
-  {#if error}<p class="error">Sessions unavailable: {error}</p>{:else if sessions === null}<p class="loading muted"><span class="spinner"></span>Loading sessions…</p>{/if}
+  {#if error}<p class="error">Sessions unavailable: {error}</p>{/if}
 </section>
 
 {#if hover}
@@ -125,6 +118,14 @@
     {#each hover.session.windows as window (window.application + window.title)}
       <p class="tip-window ellipsis">{window.application} · {window.title}</p>
     {/each}
+  </div>
+{/if}
+
+{#if commitHover}
+  {@const commit = commitHover.commit}
+  <div class="tooltip" role="tooltip" style:left={Math.min(commitHover.x, viewport - 350) + "px"} style:top={commitHover.y + "px"}>
+    <div class="tip-head"><Icon name="commit" size={13} /><strong class="ellipsis">{commit.subject}</strong></div>
+    <p class="num">{repositoryLabel(commit.repository)} · {clock(commit.time_ms, timezone)}</p>
   </div>
 {/if}
 
@@ -172,11 +173,17 @@
   .commit {
     position: absolute; right: 1px; width: 7px; height: 7px; margin-top: -3.5px; border-radius: 50%; z-index: 3;
     background: var(--surface); border: 1.5px solid var(--text);
+    transition: transform 0.12s, background 0.12s, border-color 0.12s, box-shadow 0.12s;
+  }
+  /* A larger target than the dot itself. */
+  .commit::before { content: ""; position: absolute; inset: -5px; border-radius: 50%; }
+  .commit.active {
+    background: var(--accent-strong); border-color: var(--accent-strong); transform: scale(1.5); z-index: 6;
+    box-shadow: 0 0 0 2px var(--surface), 0 0 0 5px var(--accent-soft);
   }
   .now { position: absolute; left: -1px; right: 0; height: 2px; background: var(--bad); z-index: 4; }
   .now::before { content: ""; position: absolute; left: -4px; top: -3px; width: 8px; height: 8px; border-radius: 50%; background: var(--bad); }
   .error { color: var(--bad); padding: 8px 16px 0; }
-  .loading { display: flex; gap: 8px; align-items: center; padding: 8px 16px 0; font-size: 12.5px; }
   .tip-head { display: flex; align-items: center; gap: 6px; margin-bottom: 2px; }
   .tip-window { color: var(--muted); max-width: 300px; }
 </style>

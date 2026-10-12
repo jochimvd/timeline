@@ -798,7 +798,7 @@ test("week and month views summarize days, compare honestly and drill into the d
     // One hour of Planning on Tuesday; Monday has no evidence; Thursday onwards has not begun.
     await page.waitForFunction(() => !document.querySelector("#period-focus").textContent.includes("…"));
     assert.match(await page.locator("#period-focus").innerText(), /1h\s*no comparison/);
-    assert.match(await page.locator("#period-evidence").innerText(), /No recording on Mon 21 Sept, Wed 23 Sept/);
+    assert.match(await page.locator("#period-evidence").innerText(), /No recording on 2 days, Mon 21 Sept and Wed 23 Sept/);
     const states = await page.locator(".week .column").evaluateAll(columns => columns.map(column =>
       ["missing", "future", "today"].filter(name => column.classList.contains(name)).join(" ") || "recorded"));
     assert.deepEqual(states, ["missing", "recorded", "missing today", "future", "future", "future", "future"]);

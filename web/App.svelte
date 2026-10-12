@@ -27,6 +27,16 @@
   let categoryList = $state<CategoryList | null>(null);
   let dayAttached = false;
   const selected = $derived(route.view === "day" ? null : period(route.view, route.date));
+  /** The view on screen. Entering a week or month keeps the day on screen until
+   *  the period has loaded, as the period view keeps an earlier period, so the
+   *  page changes once instead of in steps. */
+  let shown = $state<"day" | "period">(untrack(() => route.view) === "day" ? "day" : "period");
+  const periodReady = $derived(!!selected && !$periodState.loading && $periodState.period?.kind === selected.kind && $periodState.period.first === selected.first);
+  $effect(() => {
+    if (route.view === "day") shown = "day";
+    else if (periodReady) shown = "period";
+  });
+  const pending = $derived(!!session && !!selected && (shown === "day" || $periodState.loading));
   const timezone = $derived(session?.timezone ?? $day.timezone);
   let now = $state(Date.now());
   const today = $derived(activityDate(now, timezone));
@@ -125,7 +135,7 @@
   const message = $derived(error || $status.error || (route.view === "day" ? $day.message : $periodState.message));
 </script>
 
-<div class="shell" class:fill={route.view === "day"}>
+<div class="shell" class:fill={shown === "day"}>
   <header class="topbar">
     <a class="brand" href="/" onclick={event => follow(event, { view: "day", date: today })} aria-label="Timeline, today">
       <svg width="22" height="22" viewBox="0 0 24 24" aria-hidden="true">
@@ -163,6 +173,7 @@
     <button class="btn icon ghost" aria-label="Settings and details" title="Settings and details" onclick={() => drawer.set("categories")}>
       <Icon name="settings" />
     </button>
+    {#if pending}<div class="progress" role="progressbar" aria-label="Loading"></div>{/if}
   </header>
 
   {#if message}
@@ -172,7 +183,7 @@
   {/if}
 
   <main>
-    {#if route.view === "day"}
+    {#if shown === "day"}
       <DayView {app} {nodes} {choice} {today} />
     {:else if selected}
       <PeriodView model={periods} period={selected} {today} {choice} onperiod={changePeriod} onopen={(date, range) => void openDay(date, range)} />
@@ -193,6 +204,15 @@
     height: 56px; padding: 0 20px; background: color-mix(in oklab, var(--bg), transparent 15%);
     backdrop-filter: blur(12px); border-bottom: 1px solid var(--border);
   }
+  /* Sits on the top bar's border, so showing it moves nothing. */
+  .progress {
+    position: absolute; left: 0; right: 0; bottom: -1px; height: 2px; overflow: hidden; pointer-events: none;
+  }
+  .progress::after {
+    content: ""; position: absolute; top: 0; bottom: 0; left: 0; width: 30%; background: var(--accent);
+    animation: progress 1.1s ease-in-out infinite;
+  }
+  @keyframes progress { from { transform: translateX(-100%); } to { transform: translateX(333%); } }
   .brand { display: flex; align-items: center; gap: 9px; color: var(--text); text-decoration: none; font-weight: 650; font-size: 15px; letter-spacing: -0.01em; }
   .spacer { flex: 1; }
   .color-by { display: flex; align-items: center; gap: 8px; }
