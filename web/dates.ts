@@ -41,6 +41,11 @@ export function addMonths(date: string, months: number) {
   return value.toISOString().slice(0, 10);
 }
 export const daysInMonth = (date: string) => daysBetween(monthStart(date), addMonths(date, 1));
+/** The ISO week number: weeks belong to the year of their Thursday. */
+export function weekNumber(date: string) {
+  const thursday = addDays(weekStart(date), 3);
+  return 1 + Math.floor(daysBetween(thursday.slice(0, 4) + "-01-01", thursday) / 7);
+}
 
 // Calendar labels are formatted in UTC: dates carry no time of day.
 const labels = new Map<string, Intl.DateTimeFormat>();
@@ -72,9 +77,4 @@ export function dateRuns(dates: string[]) {
   const labels = runs.map(([first, last]) => first === last ? shortDate(first)
     : `${dateLabel(first, first.slice(0, 7) === last.slice(0, 7) ? { weekday: "short", day: "numeric" } : { weekday: "short", day: "numeric", month: "short" })} – ${shortDate(last)}`);
   return labels.length > 1 ? `${labels.slice(0, -1).join(", ")} and ${labels.at(-1)}` : labels[0] ?? "";
-}
-
-/** Opens a date input's picker from a click anywhere on it, not only its own icon. */
-export function openPicker(event: MouseEvent & { currentTarget: HTMLInputElement }) {
-  try { event.currentTarget.showPicker(); } catch { /* Already open, or unsupported: the input still works. */ }
 }

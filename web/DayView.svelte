@@ -1,5 +1,6 @@
 <script lang="ts">
   import CommitList from "./CommitList.svelte";
+  import DatePicker from "./DatePicker.svelte";
   import Icon from "./Icon.svelte";
   import Journal from "./Journal.svelte";
   import Scrubber from "./Scrubber.svelte";
@@ -8,7 +9,7 @@
   import { onMount } from "svelte";
   import type { CategoryNode } from "./categories";
   import { createDayDetails } from "./dayDetails";
-  import { addDays, dateLabel, openPicker } from "./dates";
+  import { addDays, dateLabel } from "./dates";
   import { drawer } from "./drawer";
   import { clock, clockRange, duration } from "./format";
   import { plural } from "./metrics";
@@ -60,10 +61,6 @@
   let tab = $state<"sessions" | "summary" | "commits">("sessions");
   const commitCount = $derived($view.commits?.configured ? $view.commits.commits.length : null);
 
-  function changeDate(event: Event) {
-    const value = (event.currentTarget as HTMLInputElement).value;
-    if (value) void app.loadDay(value);
-  }
   function reveal(range: Range) {
     document.getElementById("timeline")?.focus({ preventScroll: true });
     void app.reveal(range);
@@ -76,7 +73,7 @@
   function key(event: KeyboardEvent) {
     const target = event.target as HTMLElement;
     if (event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey || document.querySelector("dialog[open]")
-      || target.closest("input, select, textarea, [contenteditable], [role=slider]")) return;
+      || target.closest("input, select, textarea, [contenteditable], [role=slider], [role=dialog]")) return;
     const state = $view;
     if (!state.visible || state.dayLoading) return;
     if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
@@ -100,11 +97,9 @@
       <div class="date-nav">
         <button id="previous" class="btn icon ghost" aria-label="Previous day" title="Previous day ([)" disabled={!$view.day} onclick={() => app.shiftDate(-1)}>
           <Icon name="chevron-left" /></button>
-        <label class="date-picker">
-          <h1>{title}{#if year}<span class="year"> {year}</span>{/if}</h1>
-          <Icon name="chevron-down" size={14} />
-          <input type="date" id="date" onclick={openPicker} aria-label="Activity date" value={$view.date} max={addDays(today, 1)} onchange={changeDate} />
-        </label>
+        <DatePicker kind="day" value={$view.date} {today} max={addDays(today, 1)} id="date" title="Choose an activity day" onselect={date => void app.loadDay(date)}>
+          <span>{title}{#if year}<span class="year"> {year}</span>{/if}</span>
+        </DatePicker>
         <button id="next" class="btn icon ghost" aria-label="Next day" title="Next day (])" disabled={!$view.day} onclick={() => app.shiftDate(1)}>
           <Icon name="chevron-right" /></button>
         {#if $view.date !== today}
@@ -186,15 +181,7 @@
   .head { display: flex; align-items: flex-end; justify-content: space-between; gap: 24px; flex-wrap: wrap; }
   .title-block { display: flex; flex-direction: column; gap: 2px; }
   .date-nav { display: flex; align-items: center; gap: 4px; margin-left: -8px; }
-  .date-picker {
-    position: relative; display: flex; align-items: center; gap: 6px; padding: 2px 8px; border-radius: 8px; cursor: pointer; color: var(--muted);
-  }
-  .date-picker:hover { background: var(--surface-2); }
-  .date-picker:focus-within { outline: 2px solid var(--accent); }
-  .date-picker h1 { font-size: 24px; font-weight: 650; letter-spacing: -0.02em; color: var(--text); white-space: nowrap; }
   .year { color: var(--muted); font-weight: 500; }
-  .date-picker input { position: absolute; inset: 0; opacity: 0; cursor: pointer; width: 100%; }
-  .date-picker input::-webkit-calendar-picker-indicator { position: absolute; inset: 0; width: 100%; height: 100%; cursor: pointer; }
   .subtitle { font-size: 13px; padding-left: 2px; }
   .live { color: var(--good); }
   .kpis { display: flex; gap: 8px; flex-wrap: wrap; }
@@ -235,6 +222,5 @@
     .main :global(.stage .shot canvas) { max-height: 60vh; }
     .hints { display: none; }
     .kpi { min-width: calc(50% - 4px); flex: 1; }
-    .date-picker h1 { font-size: 19px; }
-  }
+    }
 </style>

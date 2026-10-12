@@ -61,9 +61,16 @@ const xAt = (page, ms) => page.evaluate(ms => {
 const bandY = async page => (await page.locator("#timeline .band").boundingBox()).y + 20;
 const timelineIdle = page => page.waitForFunction(() => document.querySelector("#timeline")?.getAttribute("aria-busy") === "false");
 const imagesIdle = page => page.waitForFunction(() => document.querySelector("#images")?.getAttribute("aria-busy") === "false");
+/** Picks a day on the day view's calendar, paging to its month. */
 async function chooseDate(page, date) {
-  await page.locator("#date").fill(date);
-  await page.locator("#date").dispatchEvent("change");
+  await page.locator("#date").click();
+  const picker = page.getByRole("dialog", { name: "Choose an activity day" });
+  for (let pages = 0; !await picker.locator(`.day:not(.outside)[data-date="${date}"]`).count(); pages++) {
+    assert.ok(pages < 24, `the calendar reaches ${date}`);
+    const shown = await picker.locator(".day:not(.outside)").first().getAttribute("data-date");
+    await picker.getByRole("button", { name: shown > date ? "Previous month" : "Next month" }).click();
+  }
+  await picker.locator(`[data-date="${date}"]`).click();
 }
 
 test("day view: screenshots, timeline, sessions, breakdown, monitors and obsolete responses", async () => {
@@ -88,7 +95,7 @@ test("day view: screenshots, timeline, sessions, breakdown, monitors and obsolet
     await page.goto(url);
     await page.waitForFunction(() => document.querySelectorAll("#images canvas").length === 2
       && document.querySelector("#images").getAttribute("aria-busy") === "false");
-    assert.equal(await page.locator("#date").inputValue(), "2026-09-22", "opening finds captures from an earlier activity day");
+    assert.equal(await page.locator("#date").getAttribute("value"), "2026-09-22", "opening finds captures from an earlier activity day");
     assert.match(await page.locator("#selected").innerText(), /04:09:55/, "opening selects the latest available screenshot");
     assert.equal(await page.locator("#zoom").inputValue(), "fit", "a day opens framed on its recorded activity");
     await timelineIdle(page);
@@ -347,7 +354,7 @@ test("day view: screenshots, timeline, sessions, breakdown, monitors and obsolet
       && document.querySelector("#timeline").getAttribute("aria-busy") === "false");
     release();
     await page.waitForTimeout(150);
-    assert.equal(await page.locator("#date").inputValue(), "2026-09-23");
+    assert.equal(await page.locator("#date").getAttribute("value"), "2026-09-23");
     assert.equal(await page.locator("#images canvas").count(), 1, "date navigation must preserve the selected image");
     assert.equal(await page.locator("#zoom").inputValue(), "1", "a day without activity opens whole");
     await page.unroute("**/api/query/resolve_range");
@@ -523,7 +530,7 @@ test("day view: screenshots, timeline, sessions, breakdown, monitors and obsolet
     releaseRefresh();
     await refreshComplete;
     await page.unroute("**/api/query/overview_updates");
-    assert.equal(await page.locator("#date").inputValue(), "2026-09-23");
+    assert.equal(await page.locator("#date").getAttribute("value"), "2026-09-23");
     assert.equal(await page.locator("#timeline .segment").count(), 0, "the old day's refresh must not reappear");
     await page.waitForFunction(() => !document.querySelector("#zoom").disabled
       && document.querySelector("#timeline").getAttribute("aria-busy") === "false");
@@ -820,9 +827,16 @@ test("week and month views summarize days, compare honestly and drill into the d
     assert.match(await page.locator("#subject-changes").innerText(), /Editor\s+1h/);
     await page.locator(".color-by button", { hasText: /^Category$/ }).click();
 
-    // The previous week, then back to this one.
-    await page.locator("#period-previous").click();
+    // The previous week, from the picker; weeks after today cannot be picked. Then back to this one.
+    await page.locator("#period-date").click();
+    const weeks = page.getByRole("dialog", { name: "Choose a week" });
+    assert.equal(await weeks.locator(".week.selected").getAttribute("aria-label"), "Week 39, 21–27 Sept 2026");
+    assert.equal(await page.evaluate(() => document.activeElement.dataset.date), "2026-09-21", "the picked week has focus");
+    assert.ok(await weeks.locator('[data-date="2026-09-28"]').isDisabled());
+    await page.keyboard.press("ArrowUp");
+    await page.keyboard.press("Enter");
     await page.waitForFunction(() => location.search === "?view=week&date=2026-09-14" && document.querySelector(".period").getAttribute("aria-busy") === "false");
+    assert.equal(await weeks.count(), 0, "picking closes the picker");
     await page.locator("#period-current").click();
     await page.waitForFunction(() => location.search === "?view=week&date=2026-09-21" && document.querySelector(".period").getAttribute("aria-busy") === "false");
 
@@ -849,8 +863,26 @@ test("week and month views summarize days, compare honestly and drill into the d
     assert.match(await page.locator(".month .cell").nth(21).getAttribute("aria-label"), /^Tuesday 22 September: 1h focus$/);
     assert.equal(await page.locator(".month .cell.missing").count(), 22, "days that began without evidence");
     assert.ok(await page.locator(".rhythm .cell[style*='--seq']").count() >= 1, "Tuesday's active hour");
+    // Months are picked from the year; a day's calendar can jump there too.
+    await page.locator("#period-date").click();
+    const months = page.getByRole("dialog", { name: "Choose a month" });
+    assert.ok(await months.getByRole("button", { name: "October 2026" }).isDisabled());
+    await months.getByRole("button", { name: "August 2026" }).click();
+    await page.waitForFunction(() => location.search === "?view=month&date=2026-08-01");
+    await page.locator("#period-current").click();
+    await page.waitForFunction(() => location.search === "?view=month&date=2026-09-01" && document.querySelector(".period").getAttribute("aria-busy") === "false");
+    await page.locator("#period-date").click();
+    await page.keyboard.press("Escape");
+    assert.equal(await months.count(), 0);
+    assert.equal(await page.evaluate(() => document.activeElement.id), "period-date", "Escape returns to the trigger");
     await page.locator(".month .cell").nth(21).click();
     await page.waitForFunction(() => document.querySelector("#date")?.value === "2026-09-22");
+    await page.locator("#date").click();
+    const days = page.getByRole("dialog", { name: "Choose an activity day" });
+    await days.getByRole("button", { name: /^September 2026, choose another month$/ }).click();
+    await days.getByRole("button", { name: "July 2026" }).click();
+    await days.getByRole("button", { name: "Wednesday, 15 July 2026" }).click();
+    await page.waitForFunction(() => location.search === "?date=2026-07-15", "picking a day replaces the opened one");
     await page.goBack();
     await page.waitForFunction(() => document.querySelector(".month .cell"));
     await page.setViewportSize({ width: 390, height: 844 });

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import DatePicker from "./DatePicker.svelte";
   import Icon from "./Icon.svelte";
   import MonthCalendar from "./MonthCalendar.svelte";
   import Patterns from "./Patterns.svelte";
@@ -6,7 +7,7 @@
   import SubjectChanges from "./SubjectChanges.svelte";
   import WeekCalendar from "./WeekCalendar.svelte";
   import { commitDays, commitProblems } from "./commits";
-  import { dateLabel, dateRuns, dateSpan, openPicker, shortDate } from "./dates";
+  import { dateLabel, dateRuns, dateSpan, shortDate, weekNumber } from "./dates";
   import { clock, duration } from "./format";
   import { plural } from "./metrics";
   import { painter } from "./paint";
@@ -65,13 +66,6 @@
   const evidenceNote = $derived(!current?.missing.length ? ""
     : current.missing.length === current.elapsed_days ? `Nothing was recorded ${inProgress ? "so far this" : "in this"} ${kind}`
     : `No recording on ${current.missing.length === 1 ? "" : `${current.missing.length} days, `}${dateRuns(current.missing)}`);
-  const changeDate = (event: Event) => { const value = (event.currentTarget as HTMLInputElement).value; if (value) onperiod(value); };
-  const weekNumber = (date: string) => {
-    const d = new Date(date + "T12:00:00Z");
-    d.setUTCDate(d.getUTCDate() + 3 - (d.getUTCDay() + 6) % 7);
-    const first = new Date(Date.UTC(d.getUTCFullYear(), 0, 4));
-    return 1 + Math.round(((d.getTime() - first.getTime()) / 86_400_000 - 3 + (first.getUTCDay() + 6) % 7) / 7);
-  };
   const heading = $derived(kind === "week" ? `Week ${weekNumber(shown.first)}` : dateLabel(shown.first, { month: "long", year: "numeric" }));
   const subheading = $derived(kind === "week" ? dateSpan(shown.first, shown.last) : `${shown.length} days`);
 </script>
@@ -87,11 +81,9 @@
     <div class="title-block">
       <div class="date-nav">
         <button id="period-previous" class="btn icon ghost" aria-label={`Previous ${kind}`} onclick={() => onperiod(period.first, -1)}><Icon name="chevron-left" /></button>
-        <label class="date-picker">
-          <h1 id="period-heading">{heading}</h1>
-          <Icon name="chevron-down" size={14} />
-          <input type="date" id="period-date" onclick={openPicker} aria-label={`Go to the ${kind} containing a date`} value={period.first} onchange={changeDate} />
-        </label>
+        <DatePicker {kind} value={period.first} {today} max={today} id="period-date" title={`Choose a ${kind}`} onselect={onperiod}>
+          <span id="period-heading">{heading}</span>
+        </DatePicker>
         <button id="period-next" class="btn icon ghost" aria-label={`Next ${kind}`} onclick={() => onperiod(period.first, 1)}><Icon name="chevron-right" /></button>
         {#if !containsDate(period, today)}<button id="period-current" class="btn small" onclick={() => onperiod(null)}>This {kind}</button>{/if}
       </div>
@@ -160,12 +152,6 @@
   .head { display: flex; align-items: flex-end; justify-content: space-between; gap: 24px; flex-wrap: wrap; }
   .title-block { display: flex; flex-direction: column; gap: 2px; }
   .date-nav { display: flex; align-items: center; gap: 4px; margin-left: -8px; }
-  .date-picker { position: relative; display: flex; align-items: center; gap: 6px; padding: 2px 8px; border-radius: 8px; cursor: pointer; color: var(--muted); }
-  .date-picker:hover { background: var(--surface-2); }
-  .date-picker:focus-within { outline: 2px solid var(--accent); }
-  .date-picker h1 { font-size: 24px; font-weight: 650; letter-spacing: -0.02em; color: var(--text); white-space: nowrap; }
-  .date-picker input { position: absolute; inset: 0; opacity: 0; cursor: pointer; width: 100%; }
-  .date-picker input::-webkit-calendar-picker-indicator { position: absolute; inset: 0; width: 100%; height: 100%; cursor: pointer; }
   .subtitle { font-size: 13px; padding-left: 2px; }
   .kpis { display: flex; gap: 8px; flex-wrap: wrap; }
   .kpi { display: flex; flex-direction: column; min-width: 140px; padding: 10px 14px; border-radius: var(--radius); background: var(--surface); border: 1px solid var(--border); }
@@ -184,5 +170,5 @@
   .loading-note { display: flex; align-items: center; gap: 10px; color: var(--muted); padding: 40px; justify-content: center; }
   .foot { font-size: 12px; }
   @media (max-width: 1180px) { .layout { grid-template-columns: 1fr; } }
-  @media (max-width: 700px) { .kpi { min-width: calc(50% - 4px); flex: 1; } .date-picker h1 { font-size: 19px; } }
+  @media (max-width: 700px) { .kpi { min-width: calc(50% - 4px); flex: 1; } }
 </style>
