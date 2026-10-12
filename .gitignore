@@ -1,16 +1,3 @@
 /target/
-/.scratch/*
-!/.scratch/desktop-recall/
-!/.scratch/desktop-recall-build/
-!/.scratch/replay/
-/.scratch/replay/*
-!/.scratch/replay/spec.md
-/.scratch/desktop-recall/*
-!/.scratch/desktop-recall/map.md
-!/.scratch/desktop-recall/issues/
-/.scratch/desktop-recall-build/*
-!/.scratch/desktop-recall-build/spec.md
-!/.scratch/desktop-recall-build/issues/
-
 /node_modules/
 /test-results/
