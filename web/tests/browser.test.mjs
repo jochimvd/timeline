@@ -641,6 +641,11 @@ test("day view: screenshots, timeline, sessions, breakdown, monitors and obsolet
     await page.locator("#now").click();
     await page.waitForFunction(() => document.querySelector("#selected").textContent === "05:00:05" && document.querySelector("#images").getAttribute("aria-busy") === "false");
     assert.equal(await page.locator("#images canvas").count(), 1, "the newest capture, five minutes before now");
+    assert.match(await page.locator("#focus").innerText(), /Added while open/, "with the focus it was captured with");
+    await timelineIdle(page);
+    const nowAt = await page.locator("#timeline").evaluate((node, now) =>
+      (now - Number(node.getAttribute("aria-valuemin"))) / (Number(node.getAttribute("aria-valuemax")) - Number(node.getAttribute("aria-valuemin"))), BASE + 3_900_000);
+    assert.ok(Math.abs(nowAt - 0.85) < 0.01, `now sits near the end of the timeline, not its middle (${nowAt})`);
     await page.clock.setFixedTime(new Date(BASE + 86400000 + 5000));
     await page.locator("#now").click();
     await page.waitForFunction(() => document.querySelector("#date").value === "2026-09-23" && document.querySelector("#images").getAttribute("aria-busy") === "false" && document.querySelector("#timeline").getAttribute("aria-busy") === "false");

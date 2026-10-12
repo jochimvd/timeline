@@ -186,6 +186,20 @@ impl Queries {
             .query_row(sql, params![selected_ms, monitor], |row| row.get(0))?)
     }
 
+    /// The newest capture whose moment has committed focus evidence: one taken
+    /// before the latest observation, since focus after it is only known once
+    /// the next observation arrives.
+    pub fn latest_screenshot(&self, client: Client, monitor: Option<&str>) -> Result<Option<i64>> {
+        let _permit = self.admit(client)?;
+        self.check_cancelled()?;
+        Ok(self.history.connection.query_row(
+            "SELECT max(unix_ms) FROM screenshots WHERE image IS NOT NULL AND (?1 IS NULL OR monitor=?1)
+                AND unix_ms < (SELECT max(unix_ms) FROM observations)",
+            params![monitor],
+            |row| row.get(0),
+        )?)
+    }
+
     /// The next capture in `direction` that looks different from what is shown at
     /// `selected_ms`: more than a few tiles changed on some monitor, the focused
     /// window changed, or capture resumed after a pause. Without one within reach,

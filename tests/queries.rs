@@ -1331,6 +1331,9 @@ fn navigation_uses_real_activity_and_distinct_capture_times_across_days() {
         q.adjacent_screenshot(Browser, 0, 0, None),
         QueryError::InvalidRequest,
     );
+    // Focus is committed until 9000: the next day's capture waits for evidence.
+    assert_eq!(q.latest_screenshot(Browser, None).unwrap(), Some(2000));
+    assert_eq!(q.latest_screenshot(Browser, Some("C")).unwrap(), None);
     let bounds = q
         .activity_bounds(Browser, Selection::Range(range(0, 10_000)))
         .unwrap();

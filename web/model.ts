@@ -219,7 +219,9 @@ export function createTimelineApp() {
     } finally { refreshing = false; }
   }
   function becameVisible() { if (!document.hidden) void refresh(); }
-  async function loadDay(date: string, center?: number, selected?: number) {
+  /** Opens `date` around `center`, or on its recorded activity; `anchor` places
+   *  the center within the visible range, which then stays within the day. */
+  async function loadDay(date: string, center?: number, selected?: number, anchor?: number) {
     if (!date) return;
     const intent = ++interactionGeneration;
     revision = "";
@@ -262,7 +264,8 @@ export function createTimelineApp() {
         }
       }
       const width = zoom === "fit" ? fitWidth! : windowWidth(day, zoom);
-      const start = Math.round(middle - width / 2);
+      const start = Math.round(anchor === undefined ? middle - width / 2
+        : Math.max(day.start_ms, Math.min(day.end_ms - width, middle - width * anchor)));
       const range = { start_ms: start, end_ms: start + width };
       // Resolve boundaries without scanning a full day whose overview would be
       // discarded whenever the dragged range straddles two activity days.
@@ -427,23 +430,26 @@ export function createTimelineApp() {
     }
     await select(range.start_ms);
   }
-  /** Selects the newest capture of the current activity day, since the present
-   *  moment has no screenshot until the next capture; without one, now itself. */
+  /** Where now sits on the timeline: near its end, since nothing follows it yet. */
+  const NOW_ANCHOR = 0.85;
+  /** Selects the newest capture of the current activity day with its focus, since
+   *  the present moment has neither until the next capture and observation;
+   *  without one, now itself. */
   async function jumpNow() {
     navigationAbort.abort(); navigationAbort = new AbortController();
     const signal = navigationAbort.signal;
     const now = Date.now();
     let ms = now;
     try {
-      const latest = await query<number | null>("adjacent_screenshot", { selected_ms: now + 1, direction: -1,
-        ...(view.layout.startsWith("monitor:") ? { monitor: view.layout.slice(8) } : {}) }, signal);
+      const latest = await query<number | null>("latest_screenshot",
+        view.layout.startsWith("monitor:") ? { monitor: view.layout.slice(8) } : {}, signal);
       if (latest !== null && activityDate(latest) === activityDate(now)) ms = latest;
     } catch (error) {
       if (signal.aborted) return;
       failure(error);
     }
-    if (activityDate(ms) !== view.date) { await loadDay(activityDate(ms), ms, ms); return; }
-    setVisible(ms);
+    if (activityDate(ms) !== view.date) { await loadDay(activityDate(ms), now, ms, NOW_ANCHOR); return; }
+    setVisible(now, NOW_ANCHOR, true);
     void loadRange();
     await select(ms);
   }

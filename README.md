@@ -139,6 +139,10 @@ own client class rather than accepting it from a request. The service offers:
   than a minute without captures. One step looks at most three hours or 5,000
   captures ahead; without a difference it lands on the furthest one. The browser
   only.
+- `latest_screenshot`: the newest capture whose moment has committed focus
+  evidence, optionally on one monitor: one taken before the latest observation,
+  since focus after it is only known once the next observation arrives. The
+  browser only.
 - `image`: retrieve the exact screenshot ID and its metadata with a bounded byte
   stream; missing/expired references or files return `QueryError::Unavailable`.
   `preview` returns a lossy rendition of at most 64–4096 pixels per edge instead.
@@ -739,15 +743,16 @@ rows instead of fetching every activity block separately.
 Opening the viewer selects the latest available screenshot and its activity day.
 With no screenshots, it opens the current activity day without a selection.
 Choosing a date opens it framed on its recorded activity (`activity_bounds`
-before its one overview read), selecting its first session if nothing is
-selected yet. Timeline zoom supports windows down to one minute via the zoom
+before its one overview read) and selects its first session; a selection from
+another day does not carry over, so a day without captures shows none. Timeline zoom supports windows down to one minute via the zoom
 control or mouse wheel. Screenshot stepping skips unavailable
 samples and duplicate monitor timestamps, respects a selected monitor, and can
 cross activity days. Arrow keys and the step buttons move to the next capture
 that looks different (`screenshot_step`) and note how much they passed over;
 `,` and `.` or Alt-click step one capture at a time. Dragging also pans across days, preserving the selected
 image and fetching history on release. Arrow keys step through changes; Shift+arrows
-pan, +/- zoom, and Home jumps to now. Fit activity frames observed focus and
+pan, +/- zoom, and Home jumps to now: the newest capture of the current activity
+day with its focus (`latest_screenshot`), with now near the end of the timeline. Fit activity frames observed focus and
 available screenshot coverage rather than empty hours.
 Click an enlarged screenshot to toggle between fitting the window and native
 resolution; scroll to inspect a large native image. Click outside the image,
