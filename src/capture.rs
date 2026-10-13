@@ -1,5 +1,6 @@
 //! Screenshot policy at the Recording seam. Triggers do not know the backend,
 //! encoder, or file layout; completion always rechecks the recording generation.
+//! Every requested capture, timer or window switch, restarts the interval.
 use crate::{
     history::{PreparedImage, ScreenshotSample},
     recording::{Input, Recorder, Stamp},
@@ -18,6 +19,8 @@ pub struct Monitor {
 
 pub enum CaptureTrigger {
     Timer,
+    /// A window switch whose focus has settled; never records gaps.
+    Switch,
 }
 
 #[derive(Clone, Debug)]
@@ -33,6 +36,8 @@ pub(crate) struct CaptureState {
     pub(crate) pending: BTreeMap<String, u64>,
     pub(crate) serial: u64,
     pub(crate) next_ms: i64,
+    pub(crate) last_request_ms: Option<i64>,
+    pub(crate) switch_ms: Option<i64>,
     pub(crate) rotation: usize,
     pub pressure: bool,
     pub pressure_cleanup: bool,
@@ -69,6 +74,7 @@ impl Recorder {
 
     pub(crate) fn invalidate_captures(&mut self, reason: &str, stamp: Stamp) -> Result<()> {
         self.capture.pending.clear();
+        self.capture.switch_ms = None;
         for monitor in self.capture.monitors.values() {
             self.history
                 .screenshot_gap(&self.sample(monitor, stamp), reason)?;
@@ -102,16 +108,49 @@ impl Recorder {
 
     pub fn request_captures(
         &mut self,
-        _: CaptureTrigger,
+        trigger: CaptureTrigger,
         stamp: Stamp,
     ) -> Result<Vec<CaptureRequest>> {
+        use crate::config::{CAPTURE_INTERVAL_MS, CAPTURE_MIN_GAP_MS, FOCUS_SETTLE_MS};
         self.apply(Input::Tick, stamp)?;
-        if !self.status.screenshot_recording || stamp.monotonic_ms < self.capture.next_ms {
+        let timer = matches!(trigger, CaptureTrigger::Timer);
+        if !self.status.screenshot_recording {
+            if !timer {
+                self.capture.switch_ms = None;
+            }
             return Ok(vec![]);
         }
-        let missed =
-            stamp.monotonic_ms - self.capture.next_ms >= crate::config::CAPTURE_INTERVAL_MS;
-        self.capture.next_ms = stamp.monotonic_ms + crate::config::CAPTURE_INTERVAL_MS;
+        let settled = self
+            .capture
+            .switch_ms
+            .is_some_and(|at| stamp.monotonic_ms - at >= FOCUS_SETTLE_MS);
+        if timer {
+            if stamp.monotonic_ms < self.capture.next_ms {
+                return Ok(vec![]);
+            }
+        } else {
+            // A settled switch waits out the minimum gap and busy monitors.
+            if !settled {
+                return Ok(vec![]);
+            }
+            let recent = self
+                .capture
+                .last_request_ms
+                .is_some_and(|at| stamp.monotonic_ms - at < CAPTURE_MIN_GAP_MS);
+            let pending = &self.capture.pending;
+            if recent
+                || self
+                    .capture
+                    .monitors
+                    .keys()
+                    .all(|m| pending.contains_key(m))
+            {
+                return Ok(vec![]);
+            }
+        }
+        let missed = timer && stamp.monotonic_ms - self.capture.next_ms >= CAPTURE_INTERVAL_MS;
+        self.capture.next_ms = stamp.monotonic_ms + CAPTURE_INTERVAL_MS;
+        self.capture.last_request_ms = Some(stamp.monotonic_ms);
         let mut monitors: Vec<_> = self.capture.monitors.values().cloned().collect();
         let count = monitors.len();
         monitors.rotate_left(self.capture.rotation % count);
@@ -123,7 +162,9 @@ impl Recorder {
                 self.history.screenshot_gap(&sample, "trigger_overdue")?;
             }
             if self.capture.pending.contains_key(&monitor.name) {
-                self.history.screenshot_gap(&sample, "capture_pending")?;
+                if timer {
+                    self.history.screenshot_gap(&sample, "capture_pending")?;
+                }
                 continue;
             }
             self.capture.serial += 1;
@@ -135,6 +176,10 @@ impl Recorder {
                 sample,
                 serial: self.capture.serial,
             });
+        }
+        // Any capture of the settled window covers the switch.
+        if settled && !requests.is_empty() {
+            self.capture.switch_ms = None;
         }
         Ok(requests)
     }

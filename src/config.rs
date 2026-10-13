@@ -73,6 +73,10 @@ fn loopback_address(value: &str) -> Result<String> {
 }
 
 pub const CAPTURE_INTERVAL_MS: i64 = 5_000;
+/// A window switch is captured once focus has stayed on the new window this long.
+pub const FOCUS_SETTLE_MS: i64 = 1_000;
+/// A settled switch waits until this long after the last requested capture.
+pub const CAPTURE_MIN_GAP_MS: i64 = 1_000;
 pub const RAW_PIXEL_BUDGET: usize = 96 * 1024 * 1024;
 pub const PRESSURE_STOP_BYTES: u64 = 20 * 1024 * 1024 * 1024;
 pub const PRESSURE_RESUME_BYTES: u64 = 25 * 1024 * 1024 * 1024;

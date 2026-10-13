@@ -1,7 +1,7 @@
 mod common;
 use timeline::{
     capture::{CaptureTrigger, Monitor},
-    recording::{Input, Recorder, Stamp},
+    recording::{Input, Recorder, Stamp, Window},
 };
 fn at(s: i64) -> Stamp {
     Stamp {
@@ -351,4 +351,270 @@ fn monitors_rotate_admission_and_reconnect_requires_a_fresh_request() {
     assert_eq!(fresh.len(), 1);
     assert_eq!(fresh[0].monitor.width, 4);
     assert!(r.capture_valid(&fresh[0]));
+}
+
+fn at_ms(ms: i64) -> Stamp {
+    Stamp {
+        unix_ms: 1_000_000 + ms,
+        monotonic_ms: ms,
+        boot_ms: ms,
+    }
+}
+fn window(address: &str, title: &str) -> Input {
+    Input::Focus(Some(Window {
+        address: address.into(),
+        application: "app".into(),
+        title: title.into(),
+    }))
+}
+/// Connected on `monitors` with focus on window `a` and the first timer
+/// capture requested at 0; pending captures are released when `release`.
+fn switching(dir: &std::path::Path, monitors: &[&str], release: bool) -> Recorder {
+    let mut r = Recorder::open(dir, at(0)).unwrap();
+    r.apply(
+        Input::Connected {
+            locked: false,
+            idle: false,
+        },
+        at(0),
+    )
+    .unwrap();
+    r.apply(window("a", "one"), at(0)).unwrap();
+    r.set_monitors(monitors.iter().map(|m| monitor(m)).collect(), at(0))
+        .unwrap();
+    let first = r.request_captures(CaptureTrigger::Timer, at(0)).unwrap();
+    assert_eq!(first.len(), monitors.len());
+    if release {
+        for request in &first {
+            r.capture_failed(request, "capture_failed", at_ms(100))
+                .unwrap();
+        }
+    }
+    r
+}
+fn trigger_gaps(r: &Recorder) -> usize {
+    r.history()
+        .screenshots(0, 100)
+        .unwrap()
+        .iter()
+        .filter(|s| {
+            matches!(
+                s.unavailable.as_deref(),
+                Some("trigger_overdue" | "capture_pending")
+            )
+        })
+        .count()
+}
+
+#[test]
+fn settled_switch_captures_and_restarts_the_timer() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut r = switching(dir.path(), &["DP-1"], true);
+    r.apply(window("b", "two"), at(2)).unwrap();
+    assert!(
+        r.request_captures(CaptureTrigger::Switch, at_ms(2_999))
+            .unwrap()
+            .is_empty()
+    );
+    let switch = r.request_captures(CaptureTrigger::Switch, at(3)).unwrap();
+    assert_eq!(switch.len(), 1);
+    assert_eq!(switch[0].sample.monotonic_ms, 3_000);
+    r.capture_failed(&switch[0], "capture_failed", at_ms(3_100))
+        .unwrap();
+    assert!(
+        r.request_captures(CaptureTrigger::Timer, at(5))
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        r.request_captures(CaptureTrigger::Switch, at(6))
+            .unwrap()
+            .is_empty(),
+        "a switch is captured once"
+    );
+    assert_eq!(
+        r.request_captures(CaptureTrigger::Timer, at(8))
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn burst_of_switches_captures_once_after_the_last_settles() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut r = switching(dir.path(), &["DP-1"], true);
+    for (address, ms) in [("b", 2_000), ("c", 2_400), ("d", 2_800)] {
+        r.apply(window(address, "title"), at_ms(ms)).unwrap();
+        assert!(
+            r.request_captures(CaptureTrigger::Switch, at_ms(ms + 300))
+                .unwrap()
+                .is_empty()
+        );
+    }
+    assert!(
+        r.request_captures(CaptureTrigger::Switch, at_ms(3_799))
+            .unwrap()
+            .is_empty()
+    );
+    let switch = r
+        .request_captures(CaptureTrigger::Switch, at_ms(3_800))
+        .unwrap();
+    assert_eq!(switch.len(), 1);
+    assert_eq!(r.status().focus.as_ref().unwrap().address, "d");
+    r.capture_failed(&switch[0], "capture_failed", at(4))
+        .unwrap();
+    assert!(
+        r.request_captures(CaptureTrigger::Switch, at(5))
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn switch_inside_the_minimum_gap_is_deferred_and_restarts_the_timer() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut r = switching(dir.path(), &["DP-1"], true);
+    r.apply(window("b", "two"), at_ms(4_500)).unwrap();
+    let timer = r.request_captures(CaptureTrigger::Timer, at(5)).unwrap();
+    assert_eq!(timer.len(), 1, "the timer fires before the switch settles");
+    r.capture_failed(&timer[0], "capture_failed", at_ms(5_100))
+        .unwrap();
+    assert!(
+        r.request_captures(CaptureTrigger::Switch, at_ms(5_999))
+            .unwrap()
+            .is_empty()
+    );
+    let switch = r.request_captures(CaptureTrigger::Switch, at(6)).unwrap();
+    assert_eq!(switch.len(), 1, "the settled switch waits out the gap");
+    r.capture_failed(&switch[0], "capture_failed", at_ms(6_100))
+        .unwrap();
+    assert!(
+        r.request_captures(CaptureTrigger::Timer, at_ms(10_999))
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        r.request_captures(CaptureTrigger::Timer, at(11))
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn switch_blocked_by_a_busy_monitor_is_covered_by_the_next_capture() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut r = Recorder::open(dir.path(), at(0)).unwrap();
+    r.apply(
+        Input::Connected {
+            locked: false,
+            idle: false,
+        },
+        at(0),
+    )
+    .unwrap();
+    r.apply(window("a", "one"), at(0)).unwrap();
+    r.set_monitors(vec![monitor("DP-1")], at(0)).unwrap();
+    let first = r.request_captures(CaptureTrigger::Timer, at(0)).unwrap();
+    r.apply(window("b", "two"), at(2)).unwrap();
+    assert!(
+        r.request_captures(CaptureTrigger::Switch, at(3))
+            .unwrap()
+            .is_empty()
+    );
+    r.capture_failed(&first[0], "capture_failed", at_ms(4_900))
+        .unwrap();
+    let timer = r.request_captures(CaptureTrigger::Timer, at(5)).unwrap();
+    assert_eq!(timer.len(), 1);
+    r.capture_failed(&timer[0], "capture_failed", at_ms(5_100))
+        .unwrap();
+    assert!(
+        r.request_captures(CaptureTrigger::Switch, at(7))
+            .unwrap()
+            .is_empty(),
+        "the timer captured the settled window"
+    );
+}
+
+#[test]
+fn title_changes_and_the_first_focus_after_connecting_do_not_trigger() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut r = switching(dir.path(), &["DP-1"], true);
+    r.apply(window("a", "renamed"), at(1)).unwrap();
+    r.apply(window("a", "again"), at(2)).unwrap();
+    assert!(
+        r.request_captures(CaptureTrigger::Switch, at(4))
+            .unwrap()
+            .is_empty()
+    );
+    r.apply(Input::Locked(true), at(4)).unwrap();
+    r.apply(Input::Locked(false), at(4)).unwrap();
+    r.apply(window("b", "two"), at(4)).unwrap();
+    assert!(
+        r.request_captures(CaptureTrigger::Switch, at(6))
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn switches_skip_pending_monitors_and_never_record_trigger_gaps() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut r = switching(dir.path(), &["DP-1"], false);
+    r.apply(window("b", "two"), at(2)).unwrap();
+    assert!(
+        r.request_captures(CaptureTrigger::Switch, at(3))
+            .unwrap()
+            .is_empty(),
+        "nothing to capture defers the switch and leaves the timer alone"
+    );
+    assert_eq!(
+        r.request_captures(CaptureTrigger::Timer, at(5))
+            .unwrap()
+            .len(),
+        0
+    );
+    assert_eq!(
+        trigger_gaps(&r),
+        1,
+        "only the timer reports a pending monitor"
+    );
+
+    // Release one monitor: the switch captures only the other, silently.
+    let dir = tempfile::tempdir().unwrap();
+    let mut r = Recorder::open(dir.path(), at(0)).unwrap();
+    r.apply(
+        Input::Connected {
+            locked: false,
+            idle: false,
+        },
+        at(0),
+    )
+    .unwrap();
+    r.apply(window("a", "one"), at(0)).unwrap();
+    r.set_monitors(vec![monitor("DP-1"), monitor("DP-2")], at(0))
+        .unwrap();
+    let first = r.request_captures(CaptureTrigger::Timer, at(0)).unwrap();
+    let released = first.iter().find(|q| q.monitor.name == "DP-2").unwrap();
+    r.capture_failed(released, "capture_failed", at_ms(100))
+        .unwrap();
+    r.apply(window("b", "two"), at(2)).unwrap();
+    let switch = r.request_captures(CaptureTrigger::Switch, at(3)).unwrap();
+    assert_eq!(switch.len(), 1);
+    assert_eq!(switch[0].monitor.name, "DP-2");
+    assert_eq!(trigger_gaps(&r), 0);
+    // A switch long after the last capture does not report the timer overdue.
+    for request in [&first[0], &switch[0]] {
+        r.capture_failed(request, "capture_failed", at(8)).unwrap();
+    }
+    let before = trigger_gaps(&r);
+    r.apply(window("c", "three"), at(17)).unwrap();
+    assert_eq!(
+        r.request_captures(CaptureTrigger::Switch, at(18))
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(trigger_gaps(&r), before);
 }

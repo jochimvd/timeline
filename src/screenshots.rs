@@ -146,13 +146,17 @@ impl Screenshots {
         // worker is busy; no new sample starts based on old lock state.
         apply_session_events(recorder, session)?;
         backend.discard_obsolete(recorder);
-        for request in recorder.request_captures(CaptureTrigger::Timer, now()?)? {
-            match backend.request(request.clone()) {
-                Ok(Some(reason)) => recorder.capture_failed(&request, reason, now()?)?,
-                Ok(None) => (),
-                Err(error) => {
-                    recorder.capture_failed(&request, "capture_disconnected", now()?)?;
-                    return self.backend_failed(recorder, error);
+        // The timer goes first so overdue gaps are still recorded; its capture
+        // also covers a switch that has already settled.
+        for trigger in [CaptureTrigger::Timer, CaptureTrigger::Switch] {
+            for request in recorder.request_captures(trigger, now()?)? {
+                match backend.request(request.clone()) {
+                    Ok(Some(reason)) => recorder.capture_failed(&request, reason, now()?)?,
+                    Ok(None) => (),
+                    Err(error) => {
+                        recorder.capture_failed(&request, "capture_disconnected", now()?)?;
+                        return self.backend_failed(recorder, error);
+                    }
                 }
             }
         }

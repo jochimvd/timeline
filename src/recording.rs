@@ -236,6 +236,10 @@ impl Recorder {
                 if next.manual_paused || next.locked || !next.connected {
                     return Ok(());
                 }
+                let address = |focus: &Option<Window>| focus.as_ref().map(|w| w.address.clone());
+                if next.focus_known && address(&next.focus) != address(&focus) {
+                    self.capture.switch_ms = Some(stamp.monotonic_ms);
+                }
                 next.focus = focus;
                 next.focus_known = true;
                 (StateChange::Focus, None)
