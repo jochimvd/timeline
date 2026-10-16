@@ -1,11 +1,13 @@
 <script lang="ts">
   import { onMount, tick, untrack } from "svelte";
   import DayView from "./DayView.svelte";
+  import Disconnected from "./Disconnected.svelte";
   import Icon from "./Icon.svelte";
   import PeriodView from "./PeriodView.svelte";
   import SettingsDrawer from "./SettingsDrawer.svelte";
   import Toasts from "./Toasts.svelte";
-  import { query } from "./api";
+  import { query, request } from "./api";
+  import { connection, lostLabel, SignedOut } from "./connection";
   import { categoryNodes, grouping, isNested, type CategoryNode } from "./categories";
   import { activityDate, dateLabel } from "./dates";
   import { createTimelineApp } from "./model";
@@ -47,7 +49,7 @@
       document.getElementById("timeline")?.focus({ preventScroll: true });
     });
   });
-  const pending = $derived(!!session && (selected ? shown === "day" || $periodState.loading : shown === "period"));
+  const pending = $derived(!!session && !$connection && (selected ? shown === "day" || $periodState.loading : shown === "period"));
   const timezone = $derived(session?.timezone ?? $day.timezone);
   let now = $state(Date.now());
   const today = $derived(activityDate(now, timezone));
@@ -120,7 +122,7 @@
     if (route.view === "day" && date && route.date !== date) untrack(() => show({ view: "day", date }, "replace"));
   });
   $effect(() => {
-    document.title = (selected ? periodTitle(selected)
+    document.title = $connection ? `${lostLabel[$connection]} · Timeline` : (selected ? periodTitle(selected)
       : $day.shown ? dateLabel($day.shown, { weekday: "short", day: "numeric", month: "short" }) : "Timeline")
       + (selected || $day.shown ? " · Timeline" : "");
   });
@@ -138,19 +140,41 @@
       void recording.start();
       query<CategoryList>("categories", {}, lifetime.signal).then(list => categoryList = list).catch(() => {});
     }).catch(failure => {
-      if (!lifetime.signal.aborted) notify(failure instanceof Error ? failure.message : String(failure), { key: "session", tone: "error" });
+      if (!lifetime.signal.aborted && !(failure instanceof SignedOut)) notify(failure instanceof Error ? failure.message : String(failure), { key: "session", tone: "error" });
     });
     return () => {
       lifetime.abort(); clearInterval(clock); window.removeEventListener("popstate", popstate);
       app.dispose(); periods.dispose(); recording.dispose();
     };
   });
+  // Signed out, the page asks the server again every few seconds and whenever
+  // it is shown, so a session started in another tab reconnects this one.
+  $effect(() => {
+    if (!$connection) return;
+    let asking = false;
+    const ask = () => {
+      if (asking || document.hidden) return;
+      asking = true;
+      void request("/api/config").catch(() => {}).finally(() => asking = false);
+    };
+    const timer = setInterval(ask, 3000);
+    window.addEventListener("focus", ask);
+    document.addEventListener("visibilitychange", ask);
+    return () => { clearInterval(timer); window.removeEventListener("focus", ask); document.removeEventListener("visibilitychange", ask); };
+  });
+  // Reconnected, every view starts afresh from the server.
+  let wasLost = false;
+  $effect(() => {
+    const lost = !!$connection;
+    if (wasLost && !lost) location.reload();
+    wasLost = lost;
+  });
   // A failed pause or resume says why until dismissed.
   const statusError = $derived($status.error);
   $effect(() => { if (statusError) untrack(() => notify(statusError, { key: "recording", tone: "error" })); });
 </script>
 
-<div class="shell" class:fill={shown === "day"}>
+<div class="shell" class:fill={shown === "day" || !!$connection}>
   <header class="topbar">
     <a class="brand" href="/" onclick={event => follow(event, { view: "day", date: today })} aria-label="Timeline, today">
       <svg width="22" height="22" viewBox="0 0 24 24" aria-hidden="true">
@@ -177,10 +201,10 @@
         </div>
       </div>
     {/if}
-    <div class="recording" class:paused={$status.paused} class:off={$status.busy && !$status.paused}>
+    <div class="recording" class:paused={$status.paused && !$connection} class:off={$status.busy && !$status.paused} class:lost={!!$connection}>
       <span class="pulse" aria-hidden="true"></span>
-      <span id="recording" class="recording-label">{$status.label}</span>
-      <button id="pause" class="btn small ghost" disabled={$status.busy} onclick={() => void recording.toggle()}
+      <span id="recording" class="recording-label">{$connection ? lostLabel[$connection] : $status.label}</span>
+      <button id="pause" class="btn small ghost" disabled={$status.busy || !!$connection} onclick={() => void recording.toggle()}
         aria-label={$status.paused ? "Resume recording" : "Pause recording"} title={$status.paused ? "Resume recording" : "Pause recording"}>
         <Icon name={$status.paused ? "play" : "pause"} size={14} />{$status.paused ? "Resume" : "Pause"}
       </button>
@@ -192,7 +216,9 @@
   </header>
 
   <main>
-    {#if shown === "day"}
+    {#if $connection}
+      <Disconnected reason={$connection} />
+    {:else if shown === "day"}
       <DayView {app} {nodes} {choice} {today} />
     {:else if selected}
       <PeriodView model={periods} period={selected} {today} {choice} onperiod={changePeriod} onopen={openDay} />
@@ -240,6 +266,8 @@
   .paused .pulse { background: var(--warn); }
   .paused .pulse::after, .off .pulse::after { display: none; }
   .off .pulse { background: var(--faint); }
+  .lost .pulse { background: var(--bad); }
+  .lost .pulse::after { display: none; }
   @keyframes ping { 0% { transform: scale(0.6); opacity: 0.7; } 80%, 100% { transform: scale(1.4); opacity: 0; } }
   main { flex: 1; padding: 20px; width: 100%; max-width: 1760px; margin: 0 auto; }
   @media (max-width: 900px) {

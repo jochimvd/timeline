@@ -1,5 +1,6 @@
 import { writable, readonly } from "svelte/store";
 import { query, pages } from "./api";
+import { SignedOut } from "./connection";
 import type { Session } from "./session";
 import { activityDate as activityDateIn, addDays } from "./dates";
 import { createDayDetails } from "./dayDetails";
@@ -83,9 +84,9 @@ export function createTimelineApp() {
   // Only calendar metadata is cached; activity still comes from a fresh snapshot.
   const resolvedDays = new Map<string, Overview["resolved"]>();
 
-  /** Says why the day could not be read, until it is read again. */
+  /** Says why the day could not be read, until it is read again. Signing out says so for the whole page. */
   function failure(error: unknown, retry?: () => void) {
-    if (!disposed && !(error instanceof DOMException && error.name === "AbortError"))
+    if (!disposed && !(error instanceof DOMException && error.name === "AbortError") && !(error instanceof SignedOut))
       notify(error instanceof Error ? error.message : String(error), { key: "day", tone: "error", retry });
   }
   function cancelNavigation() {

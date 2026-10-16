@@ -933,3 +933,57 @@ test("week and month views summarize days, compare honestly and drill into the d
     await stopFixture(fixture);
   }
 });
+
+test("a lost session or server replaces the view with one explanation and reconnects on its own", async () => {
+  const { fixture, url } = await startFixture();
+  const browser = await chromium.launch({ headless: true });
+  try {
+    const context = await browser.newContext({ viewport: { width: 1440, height: 1000 }, permissions: ["clipboard-read", "clipboard-write"] });
+    const page = await context.newPage();
+    const errors = [];
+    page.on("pageerror", (e) => errors.push(e.message));
+    const launch = new URL(url);
+    const opened = () => page.waitForFunction(() => document.querySelector("#timeline")?.getAttribute("aria-busy") === "false");
+    const lost = page.locator("#disconnected");
+    // A fresh load each time: only the fragment differs, which alone would not reload.
+    const load = async (hash = "") => { await page.goto("about:blank"); await page.goto(`${launch.origin}/?date=2026-09-22${hash}`); };
+    await page.goto(`${launch.origin}/?date=2026-09-22${launch.hash}`);
+    await opened();
+    const session = await context.cookies();
+    // Reopening a spent link still opens the page while the session lasts.
+    await load(launch.hash);
+    await opened();
+    assert.equal(await lost.count(), 0);
+
+    await context.clearCookies();
+    await load();
+    await lost.waitFor();
+    assert.match(await lost.innerText(), /Session expired[\s\S]*\$\s*timeline open/);
+    assert.equal(await page.locator("#recording").innerText(), "Session expired");
+    assert.ok(await page.locator("#pause").isDisabled(), "pausing waits for a session");
+    assert.equal(await page.locator("#timeline").count(), 0, "nothing invites picking a moment");
+    assert.equal(await page.locator("#toasts .toast").count(), 0, "the page says it once, not per request");
+    assert.equal(await page.title(), "Session expired · Timeline");
+    await lost.getByRole("button", { name: "Copy command" }).click();
+    assert.equal(await page.evaluate(() => navigator.clipboard.readText()), "timeline open");
+
+    await load(launch.hash);
+    await page.waitForFunction(() => /already used/.test(document.querySelector("#disconnected")?.textContent ?? ""));
+    assert.equal(await page.locator("#recording").innerText(), "Link already used");
+
+    // A session started elsewhere, as by `timeline open` in another tab, reconnects this one in place.
+    await context.addCookies(session);
+    await opened();
+    assert.equal(await lost.count(), 0);
+    assert.equal(new URL(page.url()).search, "?date=2026-09-22", "it returns to the same view");
+
+    await stopFixture(fixture);
+    await page.waitForFunction(() => /Can't reach timeline/.test(document.querySelector("#disconnected")?.textContent ?? ""), null, { timeout: 10_000 });
+    assert.match(await lost.innerText(), /\$\s*timeline status/);
+    assert.equal(await page.locator("#recording").innerText(), "Disconnected");
+    assert.deepEqual(errors, []);
+  } finally {
+    await browser.close();
+    await stopFixture(fixture);
+  }
+});

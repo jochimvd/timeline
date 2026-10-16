@@ -1,5 +1,6 @@
 import { readonly, writable } from "svelte/store";
 import { request } from "./api";
+import { SignedOut } from "./connection";
 
 export type RecordingState = { label: string; paused: boolean; busy: boolean; error: string };
 type Status = {
@@ -30,7 +31,7 @@ export function createRecording() {
     store.update(value => ({ ...value, busy: true }));
     let failure = "";
     try { await request("/api/recording/" + (state.paused ? "resume" : "pause"), {}, lifetime.signal); }
-    catch (error) { failure = error instanceof Error ? error.message : String(error); }
+    catch (error) { if (!(error instanceof SignedOut)) failure = error instanceof Error ? error.message : String(error); }
     await status();
     if (failure && !lifetime.signal.aborted) store.update(value => ({ ...value, error: failure }));
   }

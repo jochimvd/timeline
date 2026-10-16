@@ -1,5 +1,6 @@
 import { readonly, writable } from "svelte/store";
 import { query } from "./api";
+import { SignedOut } from "./connection";
 import { addDays } from "./dates";
 import { dismiss, notify } from "./toasts";
 import { previousSpan, type Period } from "./routes";
@@ -120,8 +121,8 @@ export function createPeriodModel() {
     } catch (error) {
       if (current !== generation || signal.aborted) return;
       patch({ loading: false, comparing: false });
-      // Says why until the period is read again.
-      notify(error instanceof Error ? error.message : String(error), { key: "period", tone: "error", retry: () => void load(period) });
+      // Says why until the period is read again. Signing out says so for the whole page.
+      if (!(error instanceof SignedOut)) notify(error instanceof Error ? error.message : String(error), { key: "period", tone: "error", retry: () => void load(period) });
     }
   }
   /** Reloads an in-progress period while shown, keeping the displayed one meanwhile. */

@@ -1,3 +1,4 @@
+import { lose, restore, SignedOut } from "./connection";
 import type { Page, Overview } from "./types";
 const tabId = crypto.randomUUID();
 // Received JSON length per decoded response; bounds pagination without re-serializing.
@@ -9,26 +10,33 @@ export async function request<T = unknown>(
   selectionGeneration?: number,
   channel = "selected",
 ): Promise<T> {
-  const response = await fetch(path, {
-    method: body === undefined ? "GET" : "POST",
-    headers: {
-      "Content-Type": "application/json", "X-Timeline-Request": "1",
-      ...(path === "/api/query/selection" ? { "X-Timeline-Selection": `${tabId}-${channel}:${selectionGeneration}` } : {}),
-    },
-    body: body === undefined ? undefined : JSON.stringify(body),
-    signal,
-  });
+  let response: Response;
+  try {
+    response = await fetch(path, {
+      method: body === undefined ? "GET" : "POST",
+      headers: {
+        "Content-Type": "application/json", "X-Timeline-Request": "1",
+        ...(path === "/api/query/selection" ? { "X-Timeline-Selection": `${tabId}-${channel}:${selectionGeneration}` } : {}),
+      },
+      body: body === undefined ? undefined : JSON.stringify(body),
+      signal,
+    });
+  } catch (error) {
+    if (signal?.aborted || (error instanceof DOMException && error.name === "AbortError")) throw error;
+    lose("unreachable");
+    throw new SignedOut("unreachable");
+  }
   if (!response.ok) {
     let reason = `Request failed (${response.status})`;
     try {
       reason = (await response.json()).error || reason;
     } catch {}
-    throw new Error(
-      reason === "unauthorized" ? "Session expired. Run timeline open to reconnect."
-      : reason === "invalid_bootstrap" ? "This launch link was already used or has expired. Run timeline open for a new one."
-      : reason,
-    );
+    if (reason === "unauthorized") { lose("expired"); throw new SignedOut("expired"); }
+    // The caller decides: this browser may still hold a session.
+    if (reason === "invalid_bootstrap") throw new SignedOut("link_used");
+    throw new Error(reason);
   }
+  restore();
   const text = await response.text();
   const value = JSON.parse(text);
   if (value !== null && typeof value === "object") responseLength.set(value, text.length);
